@@ -28,13 +28,9 @@ def get_fbgemm_generic_srcs(with_base = False):
         "src/GenerateKernelDirectConvU8S8S32ACC32.cc",
         "src/GenerateKernel.cc",
         "src/GenerateKernelU8S8S32ACC16.cc",
-        "src/GenerateKernelU8S8S32ACC16Avx512.cc",  # Acc16 AVX512 JIT code gen
-        "src/GenerateKernelU8S8S32ACC16Avx512VNNI.cc",
         "src/GenerateKernelU8S8S32ACC32.cc",
-        "src/GenerateKernelU8S8S32ACC32Avx512VNNI.cc",
         "src/GroupwiseConv.cc",
-        "src/GroupwiseConvAcc32Avx2.cc",
-        "src/GroupwiseConvAcc32Avx512.cc",
+        "src/GroupwiseConvAcc32Lasx.cc",
         "src/PackAMatrix.cc",
         "src/PackAWithIm2Col.cc",
         "src/PackAWithQuantRowOffset.cc",
@@ -60,64 +56,42 @@ def get_fbgemm_public_headers():
         "include/fbgemm/FbgemmFP16.h",
         "include/fbgemm/FbgemmFPCommon.h",
         "include/fbgemm/FbgemmI64.h",
-        "include/fbgemm/FbgemmI8DepthwiseAvx2.h",
+        "include/fbgemm/FbgemmI8DepthwiseLasx.h",
         "include/fbgemm/FbgemmI8Spmdm.h",
         "include/fbgemm/FbgemmPackMatrixB.h",
         "include/fbgemm/FbgemmSparse.h",
         "include/fbgemm/OutputProcessing-inl.h",
         "include/fbgemm/PackingTraits-inl.h",
         "include/fbgemm/QuantUtils.h",
-        "include/fbgemm/QuantUtilsAvx2.h",
-        "include/fbgemm/QuantUtilsAvx512.h",
+        "include/fbgemm/QuantUtilsLasx.h",
         "include/fbgemm/spmmUtils.h",
-        "include/fbgemm/spmmUtilsAvx2.h",
+        "include/fbgemm/spmmUtilsLasx.h",
         "include/fbgemm/Utils.h",
-        "include/fbgemm/UtilsAvx2.h",
+        "include/fbgemm/UtilsLasx.h",
         "include/fbgemm/Types.h",
     ]
 
-def get_fbgemm_avx2_srcs(msvc = False):
+def get_fbgemm_lasx_srcs():
     return [
-        #All the source files that either use avx2 instructions statically
-        "src/EmbeddingSpMDMAvx2.cc",
-        "src/FbgemmBfloat16ConvertAvx2.cc",
-        "src/FbgemmFloat16ConvertAvx2.cc",
-        "src/FbgemmI8Depthwise3DAvx2.cc",
-        "src/FbgemmI8DepthwiseAvx2.cc",
-        "src/FbgemmI8DepthwisePerChannelQuantAvx2.cc",
-        "src/FbgemmSparseDenseAvx2.cc",
-        "src/FbgemmSparseDenseInt8Avx2.cc",
-        "src/OptimizedKernelsAvx2.cc",
-        "src/PackDepthwiseConvMatrixAvx2.cc",
-        "src/QuantUtilsAvx2.cc",
-        "src/spmmUtilsAvx2.cc",
-        "src/UtilsAvx2.cc",
+        #All the source files that either use lasx instructions statically
+        "src/EmbeddingSpMDMLasx.cc",
+        "src/FbgemmBfloat16ConvertLasx.cc",
+        "src/FbgemmFloat16ConvertLasx.cc",
+        "src/FbgemmI8Depthwise3DLasx.cc",
+        "src/FbgemmI8DepthwiseLasx.cc",
+        "src/FbgemmI8DepthwisePerChannelQuantLasx.cc",
+        "src/FbgemmSparseDenseLasx.cc",
+        "src/FbgemmSparseDenseInt8Lasx.cc",
+        "src/OptimizedKernelsLasx.cc",
+        "src/PackDepthwiseConvMatrixLasx.cc",
+        "src/QuantUtilsLasx.cc",
+        "src/spmmUtilsLasx.cc",
+        "src/UtilsLasx.cc",
     ]
 
-def get_fbgemm_inline_avx2_srcs(msvc = False):
+def get_fbgemm_inline_lasx_srcs():
     return [
-        #FP16 kernels contain inline assembly and inline assembly syntax for MSVC is different.
-        "src/FbgemmFP16UKernelsAvx2.cc" if not msvc else "src/FbgemmFP16UKernelsIntrinsicAvx2.cc",
-    ]
-
-def get_fbgemm_avx512_srcs(msvc = False):
-    return [
-        #All the source files that use avx512 instructions statically
-        "src/FbgemmBfloat16ConvertAvx512.cc",
-        "src/EmbeddingSpMDMAvx512.cc",
-        "src/FbgemmFloat16ConvertAvx512.cc",
-        "src/FbgemmSparseDenseAvx512.cc",
-        "src/FbgemmSparseDenseInt8Avx512.cc",
-        "src/FbgemmSparseDenseVectorInt8Avx512.cc",
-        "src/QuantUtilsAvx512.cc",
-        "src/UtilsAvx512.cc",
-    ]
-
-def get_fbgemm_inline_avx512_srcs(msvc = False):
-    return [
-        #FP16 kernels contain inline assembly and inline assembly syntax for MSVC is different.
-        "src/FbgemmFP16UKernelsAvx512.cc" if not msvc else "src/FbgemmFP16UKernelsIntrinsicAvx512.cc",
-        "src/FbgemmFP16UKernelsAvx512_256.cc" if not msvc else "src/FbgemmFP16UKernelsIntrinsicAvx512_256.cc",
+        "src/FbgemmFP16UKernelsIntrinsicLasx.cc",
     ]
 
 def get_fbgemm_tests(skip_tests = []):

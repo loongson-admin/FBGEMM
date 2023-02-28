@@ -11,7 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
-#include "./OptimizedKernelsAvx2.h"
+#include "./OptimizedKernelsLasx.h"
 #include "fbgemm/Fbgemm.h"
 
 namespace fbgemm {
@@ -40,8 +40,7 @@ PackAWithRowOffset<T, accT>::PackAWithRowOffset(
   if (!cpuinfo_initialize()) {
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
-  if ((!fbgemmHasAvx512VnniSupport() && !fbgemmHasAvx512Support() &&
-       !fbgemmHasAvx2Support())) {
+  if (!fbgemmHasLasxSupport()) {
     assert(0 && "unknown architecure");
   }
 
@@ -52,32 +51,9 @@ PackAWithRowOffset<T, accT>::PackAWithRowOffset(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512>::getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx2>::getMatrixPackAParams();
+            PackingTraits<T, accT, inst_set_t::lasx>::getMatrixPackAParams();
         break;
 
       default:
@@ -145,7 +121,7 @@ void PackAWithRowOffset<T, accT>::pack(const block_type_t& block) {
       }
     }
   } else {
-    // reduceAvx2 only written for T == uint8_t
+    // reduceLasx only written for T == uint8_t
     static_assert(
         std::is_same<T, uint8_t>::value,
         "PackAWithRowOffset<T, accT>::pack only works for T == uint8_t");
@@ -160,7 +136,7 @@ void PackAWithRowOffset<T, accT>::pack(const block_type_t& block) {
         out[buf_idx * BaseType::blockColSize() + j] = 0;
       }
       int32_t row_sum = row_offset_acc ? row_offset_buf[buf_idx] : 0;
-      row_sum += reduceAvx2(smat_ + i * ld_ + block.col_start, block.col_size);
+      row_sum += reduceLasx(smat_ + i * ld_ + block.col_start, block.col_size);
       row_offset_buf[buf_idx] = row_sum;
     }
   }
@@ -214,12 +190,8 @@ int PackAWithRowOffset<T, accT>::rowOffsetBufferSize(
     if (params) {
       return params->MCB;
     } else {
-      if (fbgemmHasAvx512VnniSupport()) {
-        return PackingTraits<T, accT, inst_set_t::avx512_vnni>::MCB;
-      } else if (fbgemmHasAvx512Support()) {
-        return PackingTraits<T, accT, inst_set_t::avx512>::MCB;
-      } else if (fbgemmHasAvx2Support()) {
-        return PackingTraits<T, accT, inst_set_t::avx2>::MCB;
+      if (fbgemmHasLasxSupport()) {
+        return PackingTraits<T, accT, inst_set_t::lasx>::MCB;
       } else {
         // TODO: Have default slower path
         assert(0 && "unsupported architecture");

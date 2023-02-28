@@ -5,9 +5,11 @@ cc_library(
     srcs = glob([
         "src/asmjit/core/*.cpp",
         "src/asmjit/x86/*.cpp",
+        "src/asmjit/loong/*.cpp",
     ]),
     hdrs = glob([
         "src/asmjit/x86/*.h",
+        "src/asmjit/loong/*.h",
         "src/asmjit/core/*.h",
         "src/asmjit/*.h",
     ]),

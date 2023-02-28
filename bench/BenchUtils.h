@@ -9,7 +9,7 @@
 #include <functional>
 #include <vector>
 
-#include <immintrin.h>
+#include "src/x86ToLoongArchIntrin.h"
 
 #ifdef USE_BLAS
 #if __APPLE__

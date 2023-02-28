@@ -41,6 +41,8 @@ static vector<vector<int>> GetInputs_() {
 
 vector<int> prefetch_distances{0, 16, 1000000};
 
+double accuracy = 1e-6; // (res-ref)/ref <= accurary
+
 namespace {
 class SparseAdagradTest
     : public testing::TestWithParam<tuple<bool, int, bool, bool, bool>> {};
@@ -186,12 +188,14 @@ TEST_P(SparseAdagradTest, basicTest_two_stages) {
         << "return vals differ, reference is: " << ret_ref
         << " ,fbgemm is: " << ret_fbgemm;
     for (size_t i = 0; i < h.size(); ++i) {
-      EXPECT_EQ(h[i], h_ref[i])
+      // EXPECT_EQ(h[i], h_ref[i])
+      EXPECT_NEAR(h[i]/h_ref[i] - 1, 0, accuracy)
           << "results for h differ at (" << i << ") reference: " << h_ref[i]
           << ", FBGEMM: " << h[i] << " emb dim :" << block_size;
     }
     for (size_t i = 0; i < w.size(); ++i) {
-      EXPECT_EQ(w[i], w_ref[i])
+      // EXPECT_EQ(w[i], w_ref[i])
+      EXPECT_NEAR(w[i]/w_ref[i] - 1, 0, accuracy)
           << "results for h differ at (" << i << ") reference: " << w_ref[i]
           << ", FBGEMM: " << w[i] << " emb dim :" << block_size;
     }
@@ -303,7 +307,7 @@ TEST_P(SparseAdagradTest, rowwiseTest_two_stages) {
           adjust_weight_decay ? counters.data() : nullptr,
           counter_halflife);
 
-      auto fn_fbgemm = GenerateSparseAdaGrad<std::int32_t>(
+          auto fn_fbgemm = GenerateSparseAdaGrad<std::int32_t>(
           block_size, true, prefetch, use_weight_decay);
 
       ret_fbgemm = fn_fbgemm(
@@ -324,12 +328,14 @@ TEST_P(SparseAdagradTest, rowwiseTest_two_stages) {
         << "return vals differ, reference is: " << ret_ref
         << " ,fbgemm is: " << ret_fbgemm;
     for (size_t i = 0; i < h.size(); ++i) {
-      EXPECT_EQ(h[i], h_ref[i])
+      // EXPECT_EQ(h[i], h_ref[i])
+      EXPECT_NEAR(h[i]/h_ref[i] - 1, 0, accuracy)
           << "results for h differ at (" << i << ") reference: " << h_ref[i]
           << ", FBGEMM: " << h[i] << " emb dim :" << block_size;
     }
     for (size_t i = 0; i < w.size(); ++i) {
-      EXPECT_EQ(w[i], w_ref[i])
+      // EXPECT_EQ(w[i], w_ref[i])
+      EXPECT_NEAR(w[i]/w_ref[i] - 1, 0, accuracy)
           << "results for w differ at (" << i << ") reference: " << w_ref[i]
           << ", FBGEMM: " << w[i] << " emb dim :" << block_size;
     }

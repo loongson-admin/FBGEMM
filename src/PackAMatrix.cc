@@ -35,8 +35,7 @@ PackAMatrix<T, accT>::PackAMatrix(
   if (!cpuinfo_initialize()) {
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
-  if ((!fbgemmHasAvx512VnniSupport() && !fbgemmHasAvx512Support() &&
-       !fbgemmHasAvx2Support())) {
+  if (!fbgemmHasLasxSupport()) {
     assert(0 && "unknown architecure");
   }
 
@@ -47,32 +46,9 @@ PackAMatrix<T, accT>::PackAMatrix(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512>::getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx2>::getMatrixPackAParams();
+            PackingTraits<T, accT, inst_set_t::lasx>::getMatrixPackAParams();
         break;
 
       default:

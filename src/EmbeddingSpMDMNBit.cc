@@ -18,9 +18,10 @@
 #include <string>
 #include <tuple>
 #include "./CodeCache.h"
-#include "./MaskAvx2.h"
+#include "./MaskLasx.h"
 #include "./RefImplementations.h"
 #include "fbgemm/Types.h"
+#include "./CodeGenHelpers.h"
 
 using namespace std;
 
@@ -33,7 +34,7 @@ T ceil_div(T a, T b) {
   return (a + b - 1) / b;
 }
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 template <
     typename indxType,
@@ -211,13 +212,13 @@ GenEmbeddingSpMDMNBitLookup<
 
         asmjit::CodeHolder code;
         code.init(runtime().environment());
-        x86::Assembler assembler(&code);
-        x86::Emitter* a = assembler.as<x86::Emitter>();
+        la64::Assembler assembler(&code);
+        la64::Emitter* a = assembler.as<la64::Emitter>();
 #if defined(FBGEMM_LOG_CODE)
         string filename = "embeddinglookup_" + to_string(bit_rate) + "bit";
         filename += "_emd_dim_" + to_string(block_size);
         filename += areIndices64b ? "_64bit" : "_32bit";
-        filename += instSet == inst_set_t::avx512 ? "_avx512" : "_avx2";
+        filename += instSet == inst_set_t::lasx ? "_lasx" : "_loongarch";
         if (prefetch) {
           filename += "_prefetch";
         }
@@ -242,38 +243,22 @@ GenEmbeddingSpMDMNBitLookup<
         code.setLogger(codeLogger);
 #endif
         // arguments to the function created
-        x86::Gp output_size = a->zdi();
+        la64::Gp output_size = la64::a0;
         // index_size will be overwritten to hold the end address of indices
-        x86::Gp index_size = a->zsi();
-        x86::Gp data_size = a->zdx();
-        x86::Gp input = a->zcx();
-        int reg_id = 8;
-        x86::Gp indices = a->gpz(reg_id); // 8
-        ++reg_id;
-        x86::Gp lengths = a->gpz(reg_id); // 9
-        ++reg_id;
-        x86::Gp weights = a->gpz(reg_id); // 10
-        ++reg_id;
-        x86::Gp out = a->gpz(reg_id); // 11
+        la64::Gp index_size = la64::a1;
+        la64::Gp data_size = la64::a2;
+        la64::Gp input = la64::a3;
+        la64::Gp indices = la64::a4;
+        la64::Gp lengths = la64::a5;
+        la64::Gp weights = la64::a6;
+        la64::Gp out = la64::a7;
 
-        x86::Gp compressed_indices_table;
-        if (ROWWISE_SPARSE) {
-          ++reg_id;
-          compressed_indices_table = a->gpz(reg_id); // 12
-        }
-
-        ++reg_id;
-        x86::Gp scratchReg1_ = a->gpz(reg_id); // 12 or 13
-
-        ++reg_id;
-        x86::Gpd lengths_R_ = a->gpz(reg_id).r32(); // 13 or 14
-
-        ++reg_id;
-        x86::Gp scratchReg2_ = a->gpz(reg_id); // 14 or 15
-        x86::Gp scratchReg3_;
-        if (instSet == inst_set_t::avx2) {
-          scratchReg3_ = a->zax();
-        }
+        la64::Gp compressed_indices_table = la64::s0;
+        la64::Gp scratchReg1_ = la64::s1;
+        la64::Gp lengths_R_ = la64::s2;
+        la64::Gp scratchReg2_ = la64::s3;
+        la64::Gp temp_gp_0 = la64::s4;
+        la64::Gp temp_gp_1 = la64::s5;
 
         asmjit::FuncDetail func;
 
@@ -312,17 +297,15 @@ GenEmbeddingSpMDMNBitLookup<
         frame.init(func);
 
         frame.setDirtyRegs(
-            x86::Reg::kGroupVec,
+            la64::Reg::kGroupVec,
             asmjit::Support::bitMask(0, 1, 2, 3, 4, 5, 6, 7) |
                 asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15) |
                 asmjit::Support::bitMask(16, 17, 18, 19, 20, 21, 22, 23) |
                 asmjit::Support::bitMask(24, 25, 26, 27, 28, 29, 30, 31));
 
         frame.setDirtyRegs(
-            x86::Reg::kGroupGp,
-            reg_id == 15
-                ? asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15)
-                : asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14));
+            la64::Reg::kGroupGp,
+            asmjit::Support::bitMask(23, 24, 25, 26, 27, 28, 29, 30, 31));
 
         asmjit::FuncArgsAssignment args(&func);
         if (ROWWISE_SPARSE) {
@@ -375,67 +358,58 @@ GenEmbeddingSpMDMNBitLookup<
         int remainder_32bit_granularity =
             ceil_div(block_size, num_elem_per_32bit) % num_of_32bit_per_vload;
 
-        vec_reg_t scale_vreg; // holds scale
-        vec_reg_t bias_vreg; // holds bias
-        vec_reg_t w_vreg; // for weighted sls -- weights
-        vec_reg_t
-            vlen_inv_vreg; // used for normalize by lengths -- 1/ lengths[i]
-        vec_reg_t src_vreg; // for holding embedding value temporarily
-        x86::Ymm mask_vreg; // mask for avx2
-        x86::Xmm mask2_vreg;
-        x86::Xmm mask_fp16_vreg;
-
         // We need 2 vec registers for 1. scale 2. bias
         --unroll_factor;
-        scale_vreg = vec_reg_t(unroll_factor);
+        vec_reg_t scale_vreg = vec_reg_t(unroll_factor); // holds scale
         --unroll_factor;
-        bias_vreg = vec_reg_t(unroll_factor);
+        vec_reg_t bias_vreg = vec_reg_t(unroll_factor); // holds bias
+        --unroll_factor;
+        vec_reg_t src_vreg = vec_reg_t(unroll_factor); // for holding embedding value temporarily
 
-        --unroll_factor;
-        src_vreg = vec_reg_t(unroll_factor);
+        vec_reg_t w_vreg; // for weighted sls -- weights
+        vec_reg_t vlen_inv_vreg; // used for normalize by lengths -- 1/ lengths[i]
+
+        la64::VecX mask_vreg; // mask
+        la64::VecV mask2_vreg;
+        la64::VecV mask_fp16_vreg;
+
         // temporary register for bit manipulation instructions
         --unroll_factor;
         vec_reg_t temp_vreg = vec_reg_t(unroll_factor);
-        vec_reg_t temp2_vreg;
-
         --unroll_factor;
-        temp2_vreg = vec_reg_t(unroll_factor);
+        vec_reg_t temp2_vreg = vec_reg_t(unroll_factor);
 
         // Create a mask that extracts lower bit_rate bits from each 8-bit block
         --unroll_factor;
         vec_reg_t extract_mask_vreg = vec_reg_t(unroll_factor);
-        a->lea(
-            x86::rsp,
-            x86::dword_ptr(x86::rsp, -1 * static_cast<int>(sizeof(int32_t))));
+
         if (bit_rate == 4) {
-          a->mov(x86::word_ptr(x86::rsp), 0x0f0f);
-          a->vpbroadcastw(extract_mask_vreg, x86::word_ptr(x86::rsp));
+          mov_imm(a, temp_gp_0, 0x0f0f);
+          a->xvreplgr2vr_h(extract_mask_vreg, temp_gp_0);
         } else {
-          a->mov(x86::dword_ptr(x86::rsp), 0x03030303);
-          a->vpbroadcastd(extract_mask_vreg, x86::dword_ptr(x86::rsp));
+          mov_imm(a, temp_gp_0, 0x0303);
+          a->xvreplgr2vr_h(extract_mask_vreg, temp_gp_0);
         }
-        a->lea(x86::rsp, x86::dword_ptr(x86::rsp, sizeof(int32_t)));
 
         if (has_weight) {
           --unroll_factor;
           w_vreg = vec_reg_t(unroll_factor);
         }
 
-        if (remainder && instSet == inst_set_t::avx2) {
-          // AVX512 doesn't need to use vector register for masking
+        if (remainder && instSet == inst_set_t::lasx) {
           --unroll_factor;
-          mask_vreg = x86::ymm(unroll_factor);
+          mask_vreg = la64::VecX(unroll_factor);
+
           if (remainder > 1 && std::is_same<outType, float16>::value) {
             --unroll_factor;
-            mask_fp16_vreg = x86::xmm(unroll_factor);
+            mask_fp16_vreg = la64::VecV(unroll_factor);
           }
         }
 
         // Creating a mask for vector load
-        if (remainder_32bit_granularity && instSet == inst_set_t::avx2) {
-          // AVX512 doesn't need to use vector register for masking
+        if (remainder_32bit_granularity && instSet == inst_set_t::lasx) {
           --unroll_factor;
-          mask2_vreg = x86::xmm(unroll_factor);
+          mask2_vreg = la64::VecV(unroll_factor);
         }
 
         if (normalize_by_lengths) {
@@ -447,57 +421,32 @@ GenEmbeddingSpMDMNBitLookup<
         unroll_factor = unroll_factor / 4 * 4;
 
         if (remainder) {
-          if (instSet == inst_set_t::avx2) {
-            a->vmovups(
-                mask_vreg,
-                x86::ymmword_ptr(
-                    scratchReg1_, (vlen - remainder) % vlen * sizeof(int32_t)));
+          if (instSet == inst_set_t::lasx) {
+            a->xvld(mask_vreg,
+                  la64::ptr(scratchReg1_,
+                            (vlen - remainder) % vlen * sizeof(int32_t)));
             if (std::is_same<outType, float16>::value) {
               if (remainder > 1) {
-                a->vmovups(
-                    mask_fp16_vreg,
-                    x86::xmmword_ptr(
-                        scratchReg1_,
-                        (vlen - remainder / 2) * sizeof(int32_t)));
               }
               // We need to keep using the stack during the main loop
-              a->lea(
-                  x86::rsp,
-                  x86::dword_ptr(
-                      x86::rsp, static_cast<int32_t>(-vlen * sizeof(int32_t))));
             }
-          } else {
-            a->mov(scratchReg1_, (1 << remainder) - 1);
-            a->kmovw(x86::k(1), scratchReg1_);
           }
         }
 
         if (remainder_32bit_granularity) {
-          if (instSet == inst_set_t::avx2) {
-            a->lea(
-                x86::rsp,
-                x86::dword_ptr(
-                    x86::rsp, (int32_t)(-(vlen / 2) * sizeof(int32_t))));
+          if (instSet == inst_set_t::lasx) {
+            a->vxor_v(mask2_vreg, mask2_vreg, mask2_vreg);
+            mov_imm(a, temp_gp_0, -1);
             for (int i = 0; i < remainder_32bit_granularity; i++) {
-              a->mov(x86::dword_ptr(x86::rsp, i * sizeof(int32_t)), -1);
+              a->vinsgr2vr_w(mask2_vreg, temp_gp_0, i);
             }
-            for (int i = remainder_32bit_granularity; i < vlen / 2; i++) {
-              a->mov(x86::dword_ptr(x86::rsp, i * sizeof(int32_t)), 0);
-            }
-            a->vmovups(mask2_vreg, x86::dword_ptr(x86::rsp));
-            a->lea(
-                x86::rsp,
-                x86::dword_ptr(
-                    x86::rsp, (int32_t)((vlen / 2) * sizeof(int32_t))));
-          } else {
-            a->mov(scratchReg1_, (1 << remainder_32bit_granularity) - 1);
-            a->kmovw(x86::k(2), scratchReg1_);
+
           }
         }
 
         // Compute the end address of indices
-        a->lea(
-            index_size, x86::ptr(indices, index_size, areIndices64b ? 3 : 2));
+        a->slli_d(temp_gp_0, index_size, areIndices64b ? 3:2);
+        a->add_d(index_size, indices, temp_gp_0);
 
         asmjit::Label exit = a->newLabel();
         asmjit::Label error = a->newLabel();
@@ -506,38 +455,38 @@ GenEmbeddingSpMDMNBitLookup<
 
         // rangeIndex loop begins (iterate output_size times)
         a->bind(LoopRangeIndexBegin);
-        a->dec(output_size);
-        a->jl(LoopRangeIndexEnd);
+        a->addi_d(output_size, output_size, -1);
+        a->blt(output_size, la64::zero, LoopRangeIndexEnd);
 
         if (normalize_by_lengths) {
           asmjit::Label IfLengthsBegin = a->newLabel();
           asmjit::Label IfLengthsEnd = a->newLabel();
           a->bind(IfLengthsBegin);
+
+          // lengths_R_ : len
           if (use_offsets) {
-            a->mov(lengths_R_, x86::dword_ptr(lengths, sizeof(offsetType)));
-            a->sub(lengths_R_, x86::dword_ptr(lengths));
+            a->ld_w(lengths_R_, la64::ptr(lengths, sizeof(offsetType)));
+            a->ld_w(temp_gp_0, la64::ptr(lengths));
+            a->sub_d(lengths_R_, lengths_R_, temp_gp_0);
           } else {
-            a->mov(lengths_R_, x86::dword_ptr(lengths));
+            a->ld_w(lengths_R_, la64::ptr(lengths));
           }
-          a->cmp(lengths_R_, 1);
+
+          mov_imm(a, temp_gp_0, 1);
           // Initialize vlen_inv as 0 in case lengths is 0
-          a->vxorps(vlen_inv_vreg, vlen_inv_vreg, vlen_inv_vreg);
-          a->jl(IfLengthsEnd);
+          a->xvxor_v(vlen_inv_vreg, vlen_inv_vreg, vlen_inv_vreg);
+          a->blt(lengths_R_, temp_gp_0, IfLengthsEnd);
 
           vec_reg_t temp_vreg0(0);
-          if (instSet == inst_set_t::avx2) {
-            a->mov(scratchReg1_, 1);
-            a->cvtsi2ss(vlen_inv_vreg.xmm(), scratchReg1_);
-            a->cvtsi2ss(temp_vreg0.xmm(), lengths_R_);
-            a->divss(vlen_inv_vreg.xmm(), temp_vreg0.xmm());
-            a->vpbroadcastd(vlen_inv_vreg, vlen_inv_vreg.xmm());
-          } else {
-            a->mov(scratchReg1_, 1);
-            a->cvtsi2ss(temp_vreg0.xmm(), scratchReg1_);
-            a->vpbroadcastd(vlen_inv_vreg, temp_vreg0.xmm());
-            a->vpbroadcastd(temp_vreg0, lengths_R_);
-            a->vcvtdq2ps(temp_vreg0, temp_vreg0);
-            a->vdivps(vlen_inv_vreg, vlen_inv_vreg, temp_vreg0);
+          // vlen_inv_vreg : float scale = 1.f / len
+          if (instSet == inst_set_t::lasx) {
+            mov_imm(a, scratchReg1_, 1);
+            a->vinsgr2vr_d(vlen_inv_vreg, scratchReg1_, 0);
+            a->ffint_s_l(vlen_inv_vreg, vlen_inv_vreg);
+            a->vinsgr2vr_d(temp_vreg, lengths_R_, 0);
+            a->ffint_s_l(temp_vreg, temp_vreg);
+            a->fdiv_s(vlen_inv_vreg, vlen_inv_vreg, temp_vreg);
+            a->xvreplve0_w(vlen_inv_vreg, vlen_inv_vreg);
           }
           a->bind(IfLengthsEnd);
         }
@@ -550,22 +499,22 @@ GenEmbeddingSpMDMNBitLookup<
           // Initialize output regs
           for (int v = 0; v < cur_unroll_factor; ++v) {
             vec_reg_t out_vreg = vec_reg_t(v);
-            a->vxorps(out_vreg, out_vreg, out_vreg);
+            a->xvxor_v(out_vreg, out_vreg, out_vreg);
           }
 
+          // lengths_R_ : len
           if (use_offsets) {
-            a->mov(lengths_R_, x86::dword_ptr(lengths, sizeof(offsetType)));
-            a->sub(lengths_R_, x86::dword_ptr(lengths));
+            a->ld_w(lengths_R_, la64::ptr(lengths, sizeof(offsetType)));
+            a->ld_w(temp_gp_0, la64::ptr(lengths));
+            a->sub_d(lengths_R_, lengths_R_, temp_gp_0);
           } else {
-            a->mov(lengths_R_, x86::dword_ptr(lengths));
+            a->ld_w(lengths_R_, la64::ptr(lengths));
           }
 
-          // Array out of bound check
-          a->lea(
-              scratchReg1_,
-              x86::ptr(indices, lengths_R_, areIndices64b ? 3 : 2));
-          a->cmp(scratchReg1_, index_size);
-          a->jg(error);
+          // Array out of bound check:if (current + len > index_size)
+          a->slli_d(temp_gp_0, lengths_R_, areIndices64b ? 3 : 2);
+          a->add_d(scratchReg1_, temp_gp_0, indices);
+          a->blt(index_size, scratchReg1_, error);
 
           asmjit::Label LoopDataIndexBegin = a->newLabel();
           asmjit::Label LoopDataIndexEnd = a->newLabel();
@@ -573,41 +522,35 @@ GenEmbeddingSpMDMNBitLookup<
 
           // dataIndex loop begins (iterate lengths_R_ times)
           a->bind(LoopDataIndexBegin);
-          a->dec(lengths_R_);
-          a->jl(LoopDataIndexEnd);
+          a->addi_d(lengths_R_, lengths_R_, -1);
+          a->blt(lengths_R_, la64::zero, LoopDataIndexEnd);
 
           // Array out of bound check
+          // scratchReg1_ : idx = indices[current];
           if (areIndices64b) {
-            a->mov(scratchReg1_, x86::qword_ptr(indices));
+            a->ld_d(scratchReg1_, la64::ptr(indices));
           } else {
-            a->mov(scratchReg1_.r32(), x86::dword_ptr(indices));
+            a->ld_w(scratchReg1_, la64::ptr(indices));
           }
+
           if (!scale_bias_last) {
             // When scale_bias_last == false, assume this is for table batched
             // embedding (TBE) that can get -1 for pruned rows.
-            if (areIndices64b) {
-              a->cmp(scratchReg1_, static_cast<asmjit::Imm>(-1));
-            } else {
-              a->cmp(scratchReg1_.r32(), static_cast<asmjit::Imm>(-1));
-            }
-            a->jne(ValidIndexLabel);
-            a->add(indices, static_cast<asmjit::Imm>(sizeof(indxType)));
-            a->jmp(LoopDataIndexBegin);
+            mov_imm(a, temp_gp_0, -1);
+            a->bne(scratchReg1_, temp_gp_0, ValidIndexLabel);
+            a->addi_d(indices, indices, sizeof(indxType));
+            a->b(LoopDataIndexBegin);
+
             a->bind(ValidIndexLabel);
           }
           // A trick to check x >= data_size or x < 0 in one shot by treating
           // scratchReg1_ as if it has unsigned value
-          // (https://stackoverflow.com/a/34072155).
-          a->cmp(scratchReg1_, data_size);
-          a->jae(error);
+          a->bge(scratchReg1_, data_size, error);
 
           if (ROWWISE_SPARSE) {
-            a->mov(
-                scratchReg1_.r32(),
-                x86::dword_ptr(
-                    compressed_indices_table,
-                    scratchReg1_,
-                    2)); // use of 2 is to multiply by 4
+            a->slli_d(scratchReg1_, scratchReg1_, 2);
+            a->add_d(scratchReg1_, scratchReg1_, compressed_indices_table);
+            a->ld_w(scratchReg1_, la64::ptr(scratchReg1_));
           }
 
           int num_elem_per_byte = 8 / bit_rate;
@@ -616,30 +559,25 @@ GenEmbeddingSpMDMNBitLookup<
             asmjit::Label pref_dist_reset_start = a->newLabel();
             asmjit::Label pref_dist_reset_end = a->newLabel();
             // out of bound handling for prefetch
-            a->lea(
-                scratchReg2_, x86::ptr(indices, pref_dist * sizeof(indxType)));
-            a->cmp(scratchReg2_, index_size);
-            a->jge(pref_dist_reset_start);
+            mov_imm(a, temp_gp_0, pref_dist * sizeof(indxType));
+            a->add_d(scratchReg2_, temp_gp_0, indices);
+            a->bge(scratchReg2_, index_size, pref_dist_reset_start);
 
             if (areIndices64b) {
-              a->mov(
-                  scratchReg2_,
-                  x86::qword_ptr(indices, pref_dist * sizeof(indxType)));
+              a->ld_d(scratchReg2_, la64::ptr(scratchReg2_));
             } else {
-              a->mov(
-                  scratchReg2_.r32(),
-                  x86::dword_ptr(indices, pref_dist * sizeof(indxType)));
+              a->ld_w(scratchReg2_, la64::ptr(scratchReg2_));
             }
 
-            a->jmp(pref_dist_reset_end);
+            a->b(pref_dist_reset_end);
 
             a->bind(pref_dist_reset_start);
             // things are not okay just get the current row
             // this can be improved to getting the max dist row.
             if (areIndices64b) {
-              a->mov(scratchReg2_, x86::qword_ptr(indices));
+              a->ld_d(scratchReg2_, la64::ptr(indices));
             } else {
-              a->mov(scratchReg2_.r32(), x86::dword_ptr(indices));
+              a->ld_w(scratchReg2_, la64::ptr(indices));
             }
 
             a->bind(pref_dist_reset_end);
@@ -647,239 +585,215 @@ GenEmbeddingSpMDMNBitLookup<
               asmjit::Label rowwise_sparse_pref_corner_case_begin =
                   a->newLabel();
               asmjit::Label rowwise_sparse_pref_corner_case_end = a->newLabel();
-              a->cmp(scratchReg2_, data_size);
-              a->jae(rowwise_sparse_pref_corner_case_begin);
+              a->bge(scratchReg2_, data_size, rowwise_sparse_pref_corner_case_begin);
 
-              a->mov(
-                  scratchReg2_.r32(),
-                  x86::dword_ptr(
-                      compressed_indices_table,
-                      scratchReg2_,
-                      2)); // use of 2 is to multiply by 4
-              a->test(scratchReg2_.r32(), scratchReg2_.r32());
+              a->slli_d(scratchReg2_, scratchReg2_, 2);
+              a->add_d(scratchReg2_, scratchReg2_, compressed_indices_table);
+              a->ld_w(scratchReg2_, la64::ptr(scratchReg2_));
+              a->and_(temp_gp_0, scratchReg2_, scratchReg2_);
               // Check negative
-              a->jns(rowwise_sparse_pref_corner_case_end);
+              a->bge(temp_gp_0, la64::zero, rowwise_sparse_pref_corner_case_end);
 
               a->bind(rowwise_sparse_pref_corner_case_begin);
               // For corner case, just set prefetch row id to 0.
-              a->xor_(scratchReg2_.r32(), scratchReg2_.r32());
+              a->xor_(scratchReg2_, scratchReg2_, scratchReg2_);
+
               a->bind(rowwise_sparse_pref_corner_case_end);
             }
             // This has to be fused_block_size
-            a->imul(scratchReg2_, static_cast<asmjit::Imm>(fused_block_size));
+            mov_imm(a, temp_gp_0, fused_block_size);
+            a->mul_d(scratchReg2_, temp_gp_0, scratchReg2_);
           }
 
-          a->add(indices, static_cast<asmjit::Imm>(sizeof(indxType)));
+          a->addi_d(indices, indices, sizeof(indxType));
 
           if (has_weight) {
-            a->vbroadcastss(w_vreg, x86::dword_ptr(weights));
-            a->add(weights, static_cast<asmjit::Imm>(sizeof(float)));
+            a->xvldrepl_w(w_vreg, la64::ptr(weights));
+            a->addi_d(weights, weights, sizeof(float));
           }
 
           if (ROWWISE_SPARSE) {
-            a->cmp(scratchReg1_.r32(), static_cast<asmjit::Imm>(-1));
-            a->je(LoopDataIndexBegin);
+            mov_imm(a, temp_gp_0, -1);
+            a->beq(scratchReg1_, temp_gp_0, LoopDataIndexBegin);
           }
 
-          a->imul(scratchReg1_, static_cast<asmjit::Imm>(fused_block_size));
+          // scratchReg1_ : input_stride * idx
+          mov_imm(a, temp_gp_0, fused_block_size);
+          a->mul_d(scratchReg1_, temp_gp_0, scratchReg1_);
 
           // broadcast the scale
-          x86::Mem scale_src, bias_src;
           int scale_offset =
               scale_bias_last ? ceil_div(block_size, num_elem_per_byte) : 0;
-          scale_src = x86::word_ptr(input, scratchReg1_, 0, scale_offset);
-          bias_src = x86::word_ptr(
-              input, scratchReg1_, 0, scale_offset + sizeof(float16));
-          a->vpbroadcastw(scale_vreg.half(), scale_src);
-          a->vpbroadcastw(bias_vreg.half(), bias_src);
-          a->vcvtph2ps(scale_vreg, scale_vreg.half());
-          a->vcvtph2ps(bias_vreg, bias_vreg.half());
+          mov_imm(a, temp_gp_0, scale_offset);
+          a->add_d(temp_gp_0, temp_gp_0, input);
+          a->add_d(temp_gp_0, temp_gp_0, scratchReg1_);
+          a->xvldrepl_h(scale_vreg, la64::ptr(temp_gp_0));
+          a->addi_d(temp_gp_0, temp_gp_0, sizeof(float16));
+          a->xvldrepl_h(bias_vreg, la64::ptr(temp_gp_0));
+          a->xvfcvtl_s_h(scale_vreg, scale_vreg);
+          a->xvfcvtl_s_h(bias_vreg, bias_vreg);
+
           constexpr unsigned int CACHE_LINE_LEN = 64;
           if (pref_dist && fused_block_size % CACHE_LINE_LEN > 0 &&
               fused_block_size % CACHE_LINE_LEN <= 2 * sizeof(float16)) {
-            a->prefetcht0(x86::dword_ptr(
-                input,
-                scratchReg2_,
-                0,
-                fused_block_size / CACHE_LINE_LEN * CACHE_LINE_LEN));
+            mov_imm(a, temp_gp_0, fused_block_size / CACHE_LINE_LEN * CACHE_LINE_LEN);
+            a->add_d(temp_gp_0, temp_gp_0, input);
+            a->add_d(temp_gp_0, temp_gp_0, scratchReg2_);
+            a->preld(0, temp_gp_0, 0);
           }
 
           if (has_weight) {
-            a->vmulps(scale_vreg, scale_vreg, w_vreg);
-            a->vmulps(bias_vreg, bias_vreg, w_vreg);
+            a->xvfmul_s(scale_vreg, scale_vreg, w_vreg);
+            a->xvfmul_s(bias_vreg, bias_vreg, w_vreg);
           }
 
           // The main computation
-          // Handling 4 vector registers per iteration because
-          // 1) when bit_rate == 4, we get zmm from ymm load via vpmovzxbw
-          // (epu8->epi16), and then get 4 zmms from each 128-bit portion of
-          // zmm via vpmovsxbd (epi8->epi32).
-          // 2) when bit_rate == 2, we get zmm from xmm load via vpmovzxbd
-          // (epu8->epi32), and then get 4 zmms from each 128-bit portion of
-          // zmm via vpmovsxbd (epi8->epi32).
           int src_addr_offset = scale_bias_last ? 0 : 2 * sizeof(float16);
           for (int v = 0; v < cur_unroll_factor; v += 4) {
             int bytes_per_vload = (vlen / num_elem_per_byte) * sizeof(uint8_t);
-            auto src_addr = x86::dword_ptr(
-                input,
-                scratchReg1_,
-                0,
-                src_addr_offset + (vec_idx + v) * bytes_per_vload);
+            mov_imm(a, temp_gp_1, src_addr_offset + (vec_idx + v) * bytes_per_vload);
+            a->add_d(temp_gp_1, temp_gp_1, input);
+            a->add_d(temp_gp_1, temp_gp_1, scratchReg1_);
 
             if (bit_rate == 4) {
               if (num_vec_regs_per_block - (vec_idx + v) < 4 &&
                   remainder_32bit_granularity) {
                 if (instSet == inst_set_t::avx512) {
-                  a->k(x86::k(2)).vmovups(src_vreg.ymm(), src_addr);
                 } else {
-                  a->vpmaskmovd(src_vreg.xmm(), mask2_vreg.xmm(), src_addr);
+                  a->vld(src_vreg, la64::ptr(temp_gp_1));
+                  a->vand_v(src_vreg.half(), src_vreg.half(), mask2_vreg);
                 }
-                a->vpmovzxbw(src_vreg, src_vreg.half());
+                a->vext2xv_hu_bu(src_vreg, src_vreg);
               } else {
-                a->vpmovzxbw(src_vreg, src_addr);
+                a->vld(src_vreg, la64::ptr(temp_gp_1));
+                a->vext2xv_hu_bu(src_vreg, src_vreg);
               }
-              a->vpslld(temp_vreg, src_vreg, asmjit::Imm(4));
+              a->xvslli_w(temp_vreg, src_vreg, 4);
+
               if (instSet == inst_set_t::avx512) {
-                a->vpord(src_vreg, src_vreg, temp_vreg);
-                a->vpandd(src_vreg, src_vreg, extract_mask_vreg);
               } else {
-                a->vpor(src_vreg.ymm(), src_vreg.ymm(), temp_vreg.ymm());
-                a->vpand(
-                    src_vreg.ymm(), src_vreg.ymm(), extract_mask_vreg.ymm());
+                a->xvor_v(src_vreg, src_vreg, temp_vreg);
+                a->xvand_v(src_vreg, src_vreg, extract_mask_vreg);
               }
             } else {
               if (num_vec_regs_per_block - (vec_idx + v) < 4 &&
                   remainder_32bit_granularity) {
                 if (instSet == inst_set_t::avx512) {
-                  a->k(x86::k(2)).vmovups(src_vreg.xmm(), src_addr);
-                  a->vpmovzxbd(src_vreg, src_vreg.xmm());
                 } else {
-                  a->vpmaskmovd(src_vreg.xmm(), mask2_vreg.xmm(), src_addr);
-                  a->vpmovzxbd(src_vreg, src_vreg.xmm());
+                  a->xvld(src_vreg, la64::ptr(temp_gp_1));
+                  a->vand_v(src_vreg.half(), src_vreg.half(), mask2_vreg);
+                  a->vext2xv_wu_bu(src_vreg, src_vreg);
                 }
               } else {
-                a->vpmovzxbd(src_vreg, src_addr);
+                a->xvld(src_vreg, la64::ptr(temp_gp_1));
+                a->vext2xv_wu_bu(src_vreg, src_vreg);
               }
-              a->vpslld(temp_vreg, src_vreg, 2 * 8 + 2);
-              a->vpslld(temp2_vreg, src_vreg, 8 + 4);
+
+              a->xvslli_w(temp_vreg, src_vreg, 2 * 8 + 2);
+              a->xvslli_w(temp2_vreg, src_vreg, 8 + 4);
+
               if (instSet == inst_set_t::avx512) {
-                a->vpord(temp_vreg, temp_vreg, temp2_vreg);
               } else {
-                a->vpor(temp_vreg.ymm(), temp_vreg.ymm(), temp2_vreg.ymm());
+                a->xvor_v(temp_vreg, temp_vreg, temp2_vreg);
               }
-              a->vpslld(temp2_vreg, src_vreg, 6);
+              a->xvslli_w(temp2_vreg, src_vreg, 6);
+
               if (instSet == inst_set_t::avx512) {
-                a->vpord(temp_vreg, temp_vreg, temp2_vreg);
-                a->vpord(src_vreg, temp_vreg, src_vreg);
-                a->vpandd(src_vreg, src_vreg, extract_mask_vreg);
               } else {
-                a->vpor(temp_vreg.ymm(), temp_vreg.ymm(), temp2_vreg.ymm());
-                a->vpor(src_vreg.ymm(), temp_vreg.ymm(), src_vreg.ymm());
-                a->vpand(
-                    src_vreg.ymm(), src_vreg.ymm(), extract_mask_vreg.ymm());
+                a->xvor_v(temp_vreg, temp_vreg, temp2_vreg);
+                a->xvor_v(src_vreg, temp_vreg, src_vreg);
+                a->xvand_v(src_vreg, src_vreg, extract_mask_vreg);
               }
             }
 
-            // AVX2: For the following loop, operations on src_vreg impact the
-            // next iteration. For i = 0, we make a copy. i = 1 just right
-            // shifts and uses it. i = 2 we extract upper 128 bits from the copy
-            // to src_vreg and use it. i = 3 just right shifts it and uses it.
             for (int i = 0;
                  i < std::min(4, num_vec_regs_per_block - (vec_idx + v));
                  ++i) {
               vec_reg_t out_vreg = vec_reg_t(v + i);
               if (i == 0) {
-                a->vpmovsxbd(temp_vreg, src_vreg.xmm());
-                // this is only needed for avx2
-                if (instSet == inst_set_t::avx2) {
-                  a->vmovups(temp2_vreg, src_vreg);
+                a->vext2xv_w_b(temp_vreg, src_vreg);
+
+                if (instSet == inst_set_t::lasx) {
+                  a->xvbsll_v(temp2_vreg, src_vreg, 0);
                 }
               } else {
-                if (instSet == inst_set_t::avx512) {
-                  // We could've used avx512_ymm for clock frequency advantage,
-                  // if there's an instruction to extract a 64-bit portion from
-                  // a YMM as an XMM register.
-                  a->vextracti32x4(temp_vreg.xmm(), src_vreg, asmjit::Imm(i));
-                  a->vpmovsxbd(temp_vreg, temp_vreg.xmm());
-                } else {
+                {
                   if (i == 1) {
-                    a->vpsrldq(src_vreg, src_vreg, asmjit::Imm(8));
+                    a->xvbsrl_v(src_vreg, src_vreg, 8);
                   } else if (i == 2) {
-                    a->vextractf128(
-                        src_vreg.xmm(), temp2_vreg.ymm(), asmjit::Imm(i >> 1));
+                    if(1 & (i >> 1)){
+                      // temp2_vreg[255:128] -> src_vreg[127:0]
+                      a->xvpermi_d(src_vreg, temp2_vreg, 0x0e);
+                    }else{
+                      // temp2_vreg[127:0] -> src_vreg[127:0]
+                      a->vbsll_v(src_vreg, temp2_vreg, 0);
+                    }
                   } else {
-                    a->vpsrldq(src_vreg, src_vreg, asmjit::Imm(8));
+                    a->xvbsrl_v(src_vreg, src_vreg, 8);
                   }
-                  a->vpmovsxbd(temp_vreg, src_vreg.xmm());
-                } // avx2
+                  a->vext2xv_w_b(temp_vreg, src_vreg);
+
+                } // lasx
               } // i > 0
-              a->vcvtdq2ps(temp_vreg, temp_vreg);
-              a->vaddps(out_vreg, out_vreg, bias_vreg);
-              a->vfmadd231ps(out_vreg, temp_vreg, scale_vreg);
+              a->xvffint_s_w(temp_vreg, temp_vreg);
+              a->xvfadd_s(out_vreg, out_vreg, bias_vreg);
+              a->xvfmadd_s(out_vreg, temp_vreg, scale_vreg, out_vreg);
             } // for each i
 
             int vload_per_cache_line = CACHE_LINE_LEN / bytes_per_vload;
             int v_aligned = ceil_div(vec_idx + v, 4) * 4;
             if (pref_dist && v_aligned % vload_per_cache_line == 0) {
-              a->prefetcht0(x86::dword_ptr(
-                  input, scratchReg2_, 0, v_aligned * bytes_per_vload));
+              mov_imm(a, temp_gp_0, v_aligned * bytes_per_vload);
+              a->add_d(temp_gp_0, temp_gp_0, input);
+              a->add_d(temp_gp_0, temp_gp_0, scratchReg2_);
+              a->preld(0, temp_gp_0, 0);
             }
           }
 
-          a->jmp(LoopDataIndexBegin);
+          a->b(LoopDataIndexBegin);
+
           a->bind(LoopDataIndexEnd);
 
           // This loop is for writing back out_vreg (results)
           // back to memory
           for (int v = 0; v < cur_unroll_factor; ++v) {
-            auto dst_addr =
-                x86::dword_ptr(out, (vec_idx + v) * vlen * sizeof(outType));
+            mov_imm(a, temp_gp_1, (vec_idx + v) * vlen * sizeof(outType));
+            a->add_d(temp_gp_1, temp_gp_1, out);
+
             vec_reg_t out_vreg = vec_reg_t(v);
 
             if (normalize_by_lengths) {
-              a->vmulps(out_vreg, out_vreg, vlen_inv_vreg);
+              a->xvfmul_s(out_vreg, out_vreg, vlen_inv_vreg);
             }
 
             if (std::is_same<outType, float>::value) {
               if (remainder && vec_idx + v == num_vec_regs_per_block - 1) {
                 if (instSet == inst_set_t::avx512) {
-                  a->k(x86::k(1)).vmovups(dst_addr, out_vreg);
                 } else {
-                  a->vmaskmovps(dst_addr, mask_vreg, out_vreg.ymm());
+                  a->add_d(temp_gp_0, temp_gp_1, la64::zero);
+                  for(int st_idx = 0; st_idx < remainder; st_idx++){
+                    a->xvstelm_w(out_vreg, temp_gp_0, 0, st_idx);
+                    a->addi_d(temp_gp_0, temp_gp_0, sizeof(float));
+                  }
                 }
               } else {
-                a->vmovups(dst_addr, out_vreg);
+                a->xvst(out_vreg, la64::ptr(temp_gp_1));
               }
             } else {
               // fp16 output
-              if (instSet == inst_set_t::avx2) {
+              if (instSet == inst_set_t::lasx) {
                 // round nearest with no exception
-                a->vcvtps2ph(out_vreg.xmm(), out_vreg, 8);
+                a->xvpermi_d(temp_vreg, out_vreg, 0x0e);      // out_vreg[255:128] -> temp_xv_0[127:0]
+                a->xvfcvt_h_s(out_vreg, temp_vreg, out_vreg); // float -> f16
+
                 if (remainder && vec_idx + v == num_vec_regs_per_block - 1) {
-                  if (remainder > 1) {
-                    a->vmaskmovps(dst_addr, mask_fp16_vreg, out_vreg.xmm());
-                  }
-                  if (remainder % 2 != 0) {
-                    a->vmovups(x86::xmmword_ptr(x86::rsp), out_vreg.xmm());
-                    a->mov(
-                        scratchReg1_.r16(),
-                        x86::word_ptr(
-                            x86::rsp, (remainder - 1) * sizeof(outType)));
-                    a->mov(
-                        x86::word_ptr(
-                            out,
-                            ((vec_idx + v) * vlen + (remainder - 1)) *
-                                sizeof(outType)),
-                        scratchReg1_.r16());
+                  a->add_d(temp_gp_0, temp_gp_1, la64::zero);
+                  for(int st_idx = 0; st_idx < remainder; st_idx++){
+                    a->xvstelm_h(out_vreg, temp_gp_0, 0, st_idx);
+                    a->addi_d(temp_gp_0, temp_gp_0, sizeof(outType));
                   }
                 } else {
-                  a->vmovups(dst_addr, out_vreg.xmm());
-                }
-              } else {
-                if (remainder && vec_idx + v == num_vec_regs_per_block - 1) {
-                  a->k(x86::k(1)).vcvtps2ph(dst_addr, out_vreg, 8);
-                } else {
-                  a->vcvtps2ph(dst_addr, out_vreg, 8);
+                  a->vst(out_vreg, la64::ptr(temp_gp_1));
                 }
               }
             }
@@ -890,53 +804,47 @@ GenEmbeddingSpMDMNBitLookup<
             // Reset lengths_R_, indices, weights to run the dataIndex loop
             // again
             if (use_offsets) {
-              a->mov(lengths_R_, x86::dword_ptr(lengths, sizeof(offsetType)));
-              a->sub(lengths_R_, x86::dword_ptr(lengths));
+              a->ld_w(lengths_R_, la64::ptr(lengths, sizeof(offsetType)));
+              a->ld_w(temp_gp_0, la64::ptr(lengths));
+              a->sub_w(lengths_R_, lengths_R_, temp_gp_0);
             } else {
-              a->mov(lengths_R_, x86::dword_ptr(lengths));
+              a->ld_w(lengths_R_, la64::ptr(lengths));
             }
 
             if (has_weight) {
-              a->imul(
-                  scratchReg1_,
-                  lengths_R_,
-                  static_cast<asmjit::Imm>(sizeof(float)));
-              a->sub(weights, scratchReg1_);
+              mov_imm(a, temp_gp_0, sizeof(float));
+              a->mul_d(scratchReg1_, lengths_R_, temp_gp_0);
+              a->sub_d(weights, weights, scratchReg1_);
 
               if (vec_idx + unroll_factor < num_vec_regs_per_block) {
-                a->imul(
-                    scratchReg1_,
-                    static_cast<asmjit::Imm>(sizeof(indxType) / sizeof(float)));
-                a->sub(indices, scratchReg1_);
+                mov_imm(a, temp_gp_0, sizeof(indxType) / sizeof(float));
+                a->mul_d(scratchReg1_, scratchReg1_, temp_gp_0);
+                a->sub_d(indices, indices, scratchReg1_);
               }
             } else {
-              a->imul(
-                  scratchReg1_,
-                  lengths_R_,
-                  static_cast<asmjit::Imm>(sizeof(indxType)));
-              a->sub(indices, scratchReg1_);
+              mov_imm(a, temp_gp_0, sizeof(indxType));
+              a->mul_d(scratchReg1_, lengths_R_, temp_gp_0);
+              a->sub_d(indices, indices, scratchReg1_);
             }
           }
         }
 
-        a->add(lengths, static_cast<asmjit::Imm>(sizeof(offsetType)));
-        a->add(out, static_cast<asmjit::Imm>(output_stride * sizeof(outType)));
+        a->addi_d(lengths, lengths, sizeof(offsetType));
+        mov_imm(a, temp_gp_0, output_stride * sizeof(outType));
+        a->add_d(out, out, temp_gp_0);
 
-        a->jmp(LoopRangeIndexBegin);
+        a->b(LoopRangeIndexBegin);
+
         a->bind(LoopRangeIndexEnd);
 
-        a->cmp(indices, index_size);
-        a->jne(error);
-        a->mov(x86::eax, true);
-        a->jmp(exit);
-        a->bind(error);
-        a->mov(x86::eax, false);
-        a->bind(exit);
+        a->bne(indices, index_size, error);
+        mov_imm(a, la64::a0, 1); // return true;
+        a->b(exit);
 
-        if (remainder && instSet == inst_set_t::avx2 &&
-            std::is_same<outType, float16>::value) {
-          a->lea(x86::rsp, x86::ymmword_ptr(x86::rsp, vlen * sizeof(int32_t)));
-        }
+        a->bind(error);
+        mov_imm(a, la64::a0, 0);
+
+        a->bind(exit);
 
         a->emitEpilog(frame);
 
@@ -993,12 +901,13 @@ typename EmbeddingSpMDMKernelSignature<uint8_t, indxType, offsetType, outType>::
     input_stride =
         ceil_div(block_size, num_elem_per_byte) + 2 * sizeof(float16);
   }
-  if (fbgemmHasAvx512Support()) {
+
+  if (fbgemmHasLasxSupport()) {
     static GenEmbeddingSpMDMNBitLookup<
         indxType,
         offsetType,
         outType,
-        inst_set_t::avx512>
+        inst_set_t::lasx>
         kernel_generator;
     const auto original_func = kernel_generator.getOrCreate(
         bit_rate,
@@ -1028,48 +937,11 @@ typename EmbeddingSpMDMKernelSignature<uint8_t, indxType, offsetType, outType>::
           offsets_or_lengths,
           weights,
           out,
-          nullptr /* mask not used in avx512 */);
-    };
-  } else if (fbgemmHasAvx2Support()) {
-    static GenEmbeddingSpMDMNBitLookup<
-        indxType,
-        offsetType,
-        outType,
-        inst_set_t::avx2>
-        kernel_generator;
-    const auto original_func = kernel_generator.getOrCreate(
-        bit_rate,
-        block_size,
-        has_weight,
-        is_weight_positional,
-        normalize_by_lengths,
-        prefetch,
-        use_offsets,
-        output_stride,
-        input_stride,
-        scale_bias_last);
-    return [=](int64_t output_size,
-               int64_t index_size,
-               int64_t data_size,
-               const uint8_t* input,
-               const indxType* indices,
-               const offsetType* offsets_or_lengths,
-               const float* weights,
-               outType* out) {
-      return original_func(
-          output_size,
-          index_size,
-          data_size,
-          input,
-          indices,
-          offsets_or_lengths,
-          weights,
-          out,
-          internal::avx2_ps_or_epi32_combined_mask);
+          internal::lasx_ps_or_epi32_combined_mask);
     };
   } else {
 #ifdef VLOG
-    VLOG(0) << "AVX2 or AVX512 not found, taking the slow path";
+    VLOG(0) << "LASX not found, taking the slow path";
 #endif
     return [=](int64_t output_size,
                int64_t index_size,
@@ -1145,12 +1017,13 @@ GenerateEmbeddingSpMDMNBitRowWiseSparse(
   int64_t num_elem_per_byte = 8 / bit_rate;
   int64_t input_stride =
       ceil_div(block_size, num_elem_per_byte) + 2 * sizeof(float16);
-  if (fbgemmHasAvx512Support()) {
+
+  if (fbgemmHasLasxSupport()) {
     static GenEmbeddingSpMDMNBitLookup<
         indxType,
         offsetType,
         /*outType=*/float,
-        inst_set_t::avx512,
+        inst_set_t::lasx,
         /*rowwise_sparse=*/true>
         kernel_generator;
     const auto original_func = kernel_generator.getOrCreate(
@@ -1183,51 +1056,11 @@ GenerateEmbeddingSpMDMNBitRowWiseSparse(
           weights,
           out,
           compressed_indices_table,
-          nullptr /* mask not used in avx512 */);
-    };
-  } else if (fbgemmHasAvx2Support()) {
-    static GenEmbeddingSpMDMNBitLookup<
-        indxType,
-        offsetType,
-        /*outType=*/float,
-        inst_set_t::avx2,
-        /*rowwise_sparse=*/true>
-        kernel_generator;
-    const auto original_func = kernel_generator.getOrCreate(
-        bit_rate,
-        block_size,
-        has_weight,
-        is_weight_positional,
-        normalize_by_lengths,
-        prefetch,
-        use_offsets,
-        /*output_stride=*/block_size,
-        input_stride,
-        /*scale_bias_last=*/true);
-    return [=](int64_t output_size,
-               int64_t index_size,
-               int64_t uncompressed_data_size,
-               const uint8_t* input,
-               const indxType* indices,
-               const offsetType* offsets_or_lengths,
-               const float* weights,
-               float* out,
-               const int32_t* compressed_indices_table) {
-      return original_func(
-          output_size,
-          index_size,
-          uncompressed_data_size,
-          input,
-          indices,
-          offsets_or_lengths,
-          weights,
-          out,
-          compressed_indices_table,
-          internal::avx2_ps_or_epi32_combined_mask);
+          internal::lasx_ps_or_epi32_combined_mask);
     };
   } else {
 #ifdef VLOG
-    VLOG(0) << "AVX2 or AVX512 not found, taking the slow path";
+    VLOG(0) << "LASX not found, taking the slow path";
 #endif
     return [=](int64_t output_size,
                int64_t index_size,

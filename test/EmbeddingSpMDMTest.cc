@@ -193,6 +193,7 @@ TEST_P(EmbeddingSpMDMTest, basicTest) {
 
     bool success, success_ref;
 
+
 #define TEST_BASE(                                             \
     table,                                                     \
     indices,                                                   \
@@ -313,7 +314,7 @@ TEST_P(EmbeddingSpMDMTest, basicTest) {
               ? output_ref[offset]
               : cpu_half2float(output_ref_fp16[offset]);
           EXPECT_EQ(actual, expected)
-              << "results differ at (" << i << ") reference: " << expected
+              << "results differ at (" << i <<", " << j << ") reference: " << expected
               << ", FBGEMM: " << actual << " emb dim :" << embedding_dim;
         }
       }
@@ -326,7 +327,6 @@ TEST_P(EmbeddingSpMDMTest, basicTest) {
             ? output_ref[offset]
             : cpu_half2float(output_ref_fp16[offset]);
         EXPECT_EQ(actual, expected)
-            << "results differ at (" << offset << ") reference: " << expected
             << ", FBGEMM: " << actual << " emb dim :" << embedding_dim;
       }
     }

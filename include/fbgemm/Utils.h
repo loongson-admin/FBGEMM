@@ -11,7 +11,7 @@
 #include <string>
 #include <type_traits>
 #include "./FbgemmBuild.h"
-#include "./UtilsAvx2.h"
+#include "./UtilsLasx.h"
 
 // forward declarations to asmjit
 namespace asmjit {
@@ -20,6 +20,12 @@ class Xmm;
 class Ymm;
 class Zmm;
 } // namespace x86
+
+namespace loong {
+class VecV;
+class VecX;
+} // namespace loongarch
+
 } // namespace asmjit
 
 namespace fbgemm {
@@ -43,6 +49,7 @@ enum class matrix_op_t { NoTranspose, Transpose };
  */
 enum class inst_set_t {
   anyarch,
+  lasx,
   avx2,
   avx512,
   avx512_ymm,
@@ -80,6 +87,16 @@ enum class FBGEMM_ENUM_CLASS_API layout_t { KCX, KXC };
  */
 template <inst_set_t inst_set>
 struct simd_info;
+
+template <>
+struct simd_info<inst_set_t::lasx> {
+  static constexpr int WIDTH_BITS = 256;
+  static constexpr int WIDTH_BYTES = 32;
+  static constexpr int WIDTH_32BIT_ELEMS = 8;
+  static constexpr int NUM_VEC_REGS = 32;
+
+  using vec_reg_t = asmjit::loong::VecX;
+};
 
 template <>
 struct simd_info<inst_set_t::avx2> {
@@ -183,6 +200,11 @@ FBGEMM_API bool fbgemmHasAvx512Support();
  * @brief Are we running on a AVX2 supported cpu?
  */
 FBGEMM_API bool fbgemmHasAvx2Support();
+
+/**
+ * @brief Are we running on a LASX supported cpu?
+ */
+FBGEMM_API bool fbgemmHasLasxSupport();
 
 /**
  * @brief Are we running on a AVX512_VNNI supported cpu?

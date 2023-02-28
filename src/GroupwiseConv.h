@@ -19,33 +19,20 @@
 #include "fbgemm/ConvUtils.h"
 #include "fbgemm/Fbgemm.h"
 #include "fbgemm/Utils.h"
-/*#define FBGEMM_LOG_CODE 1*/
+//#define FBGEMM_LOG_CODE 1
 
-#define GCONV_INST_AVX2_HEADER          \
+#define GCONV_INST_LASX_HEADER          \
   template <inst_set_t ISET = INST_SET> \
-  typename std::enable_if<ISET == inst_set_t::avx2, void>::type
+  typename std::enable_if<ISET == inst_set_t::lasx, void>::type
 
-#define GCONV_INST_AVX512_AND_VNNI_HEADER                            \
-  template <inst_set_t ISET = INST_SET>                              \
-  typename std::enable_if<                                           \
-      ISET == inst_set_t::avx512 || ISET == inst_set_t::avx512_vnni, \
-      void>::type
-
-#define GCONV_INST_DEF_AVX2_HEADER                \
+#define GCONV_INST_DEF_LASX_HEADER                \
   template <int SPATIAL_DIM, inst_set_t INST_SET> \
   template <inst_set_t ISET>                      \
-  typename std::enable_if<ISET == inst_set_t::avx2, void>::type
-
-#define GCONV_INST_DEF_AVX512_AND_VNNI_HEADER                        \
-  template <int SPATIAL_DIM, inst_set_t INST_SET>                    \
-  template <inst_set_t ISET>                                         \
-  typename std::enable_if<                                           \
-      ISET == inst_set_t::avx512 || ISET == inst_set_t::avx512_vnni, \
-      void>::type
+  typename std::enable_if<ISET == inst_set_t::lasx, void>::type
 
 namespace fbgemm {
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 template <typename>
 struct is_requantization : std::false_type {};
@@ -145,10 +132,8 @@ class GenConvKernelBase {
     oss << "_useRightPadding-" << std::get<6>(kernel_sig);
     oss << "_accum-" << std::get<7>(kernel_sig);
 
-    if (INST_SET == inst_set_t::avx512) {
-      oss << "_avx512";
-    } else if (INST_SET == inst_set_t::avx2) {
-      oss << "_avx2";
+    if (INST_SET == inst_set_t::lasx) {
+      oss << "_lasx";
     } else {
       oss << "_unknown";
     }
@@ -236,48 +221,35 @@ class FBGEMM_API GenConvKernel
     actReg_V_ = vec_reg_t(13);
     oneReg16Bit_V_ = vec_reg_t(15);
     rowOffsetReg_V_ = vec_reg_t(14);
+
+    tmpReg2_V_ = vec_reg_t(16);
   }
 
   jit_conv_kernel_fp getOrCreate();
 
-  GCONV_INST_AVX2_HEADER genForLoadingWeights(x86::Emitter* a);
+  GCONV_INST_LASX_HEADER genForLoadingWeights(la64::Emitter* a);
 
-  GCONV_INST_AVX512_AND_VNNI_HEADER genForLoadingWeights(x86::Emitter* a);
+  GCONV_INST_LASX_HEADER genConstForPermutations(la64::Emitter* a);
 
-  GCONV_INST_AVX2_HEADER genConstForPermutations(x86::Emitter* a);
-
-  GCONV_INST_AVX512_AND_VNNI_HEADER genConstForPermutations(x86::Emitter* a);
-
-  GCONV_INST_AVX2_HEADER genForSingleFilterPoint(
-      x86::Emitter* a,
+  GCONV_INST_LASX_HEADER genForSingleFilterPoint(
+      la64::Emitter* a,
       int r,
       int s,
       int act_s,
       bool use_zero_reg);
 
-  GCONV_INST_AVX512_AND_VNNI_HEADER genForSingleFilterPoint(
-      x86::Emitter* a,
-      int r,
-      int s,
-      int act_s,
-      bool use_zero_reg);
+  GCONV_INST_LASX_HEADER storeResult(la64::Emitter* a);
 
-  GCONV_INST_AVX2_HEADER storeResult(x86::Emitter* a);
+  GCONV_INST_LASX_HEADER storeOffset(la64::Emitter* a);
 
-  GCONV_INST_AVX512_AND_VNNI_HEADER storeResult(x86::Emitter* a);
+  void genForTopOrBottomEdge(la64::Emitter* a, bool isTop, bool isBottom);
 
-  GCONV_INST_AVX2_HEADER storeOffset(x86::Emitter* a);
+  void initResultRegs(la64::Emitter* a);
 
-  GCONV_INST_AVX512_AND_VNNI_HEADER storeOffset(x86::Emitter* a);
-
-  void genForTopOrBottomEdge(x86::Emitter* a, bool isTop, bool isBottom);
-
-  void initResultRegs(x86::Emitter* a);
-
-  void genCoreInsts(x86::Emitter* a);
+  void genCoreInsts(la64::Emitter* a);
 
   void genForSingleOutput(
-      x86::Emitter* a,
+      la64::Emitter* a,
       bool isLeft,
       bool isRight,
       bool isTop,
@@ -288,7 +260,6 @@ class FBGEMM_API GenConvKernel
   // The number of iterations needed for K dim.
   // e.g., C_per_G_ = K_per_G_ = 8, we have to iterate
   // twice on K dim because 4 (from K dim) * 8 ( from C dim)
-  // fill the full avx2 vector width.
   int kLoopIters_;
   asmjit::FuncDetail func_;
   asmjit::FuncFrame frame_;
@@ -301,22 +272,27 @@ class FBGEMM_API GenConvKernel
   vec_reg_t oneReg16Bit_V_;
   vec_reg_t rowOffsetReg_V_;
 
+  vec_reg_t tmpReg2_V_;
+
   // arguments to the function created
-  x86::Gp in_acts_R_;
-  x86::Gp wghts_R_;
-  x86::Gp out_acts_R_;
-  x86::Gp a_zero_pt_R_;
-  x86::Gp H_R_;
-  x86::Gp H_start_R_;
-  x86::Gp H_end_R_;
-  x86::Gp W_R_;
-  x86::Gp row_offset_R_;
+  la64::Gp in_acts_R_;
+  la64::Gp wghts_R_;
+  la64::Gp out_acts_R_;
+  la64::Gp a_zero_pt_R_;
+  la64::Gp H_R_;
+  la64::Gp H_start_R_;
+  la64::Gp H_end_R_;
+  la64::Gp W_R_;
+  la64::Gp row_offset_R_;
 
   // Used registers
-  x86::Gp loopR1_;
-  x86::Gp loopR2_;
-  x86::Gp scratchReg1_;
-  x86::Gp scratchReg2_;
+  la64::Gp loopR1_;
+  la64::Gp loopR2_;
+  la64::Gp scratchReg1_;
+  la64::Gp scratchReg2_;
+
+  la64::Gp backup_W_R_;
+
 };
 
 template <int SPATIAL_DIM, inst_set_t INST_SET>

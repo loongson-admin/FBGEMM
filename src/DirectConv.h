@@ -23,12 +23,11 @@
 
 namespace fbgemm {
 
-namespace x86 = asmjit::x86;
-
+namespace la64 = asmjit::la64;
 /**
  * @brief Generate instructions for initializing the C registers to 0.
  */
-void initCRegs(x86::Emitter* a, int rowRegs, int colRegs);
+void initCRegs(la64::Emitter* a, int rowRegs, int colRegs);
 
 static asmjit::JitRuntime& runtime() {
   static asmjit::JitRuntime rt; //< JIT Runtime for asmjit,
@@ -83,11 +82,11 @@ class DirectConvCodeGenBase {
    */
   template <inst_set_t instSet>
   void storeCRegs(
-      x86::Emitter* a,
+      la64::Emitter* a,
       int rowRegs,
       int colRegs,
-      x86::Gp C_Offset,
-      x86::Gp ldcReg,
+      la64::Gp C_Offset,
+      la64::Gp ldcReg,
       bool accum);
 
   /**
@@ -96,12 +95,12 @@ class DirectConvCodeGenBase {
    */
   template <inst_set_t instSet>
   void storeCRegsTrans(
-      x86::Emitter* a,
+      la64::Emitter* a,
       int rowRegs,
       int colRegs,
-      x86::Gp C_offset,
-      x86::Gp o1XocReg,
-      x86::Gp ldcReg,
+      la64::Gp C_offset,
+      la64::Gp o1XocReg,
+      la64::Gp ldcReg,
       bool accum);
 
   /**
@@ -130,18 +129,14 @@ class DirectConvCodeGenBase {
         << "_NC-" + std::to_string(nc) << "_NCB-" + std::to_string(NCB)
         << "_KCB-" + std::to_string(KCB) << "_MR-" + std::to_string(MR)
         << "_NR-" + std::to_string(NR);
-    if (instSet == inst_set_t::avx512_vnni) {
-      oss << "_avx512vnni";
-    } else if (instSet == inst_set_t::avx512) {
-      oss << "_avx512";
-    } else if (instSet == inst_set_t::avx512_ymm) {
-      oss << "_avx512_ymm";
-    } else if (instSet == inst_set_t::avx2) {
-      oss << "_avx2";
+    if (instSet == inst_set_t::lasx) {
+      oss << "_lasx";
     }
     oss << ".txt";
     return oss.str();
   }
+
+
 
   /**
    * @brief Get or Create the instructions for macro-kernel.
@@ -173,10 +168,10 @@ class DirectConvCodeGenBase {
    */
   template <inst_set_t instSet>
   void genComputeBlock(
-      x86::Emitter* a,
-      x86::Gp buffer_A,
-      x86::Gp buffer_B,
-      x86::Gp B_pf,
+      la64::Emitter* a,
+      la64::Gp buffer_A,
+      la64::Gp buffer_B,
+      la64::Gp B_pf,
       int rowRegs,
       int colRegs,
       int lda);
@@ -185,10 +180,10 @@ class DirectConvCodeGenBase {
    */
   template <inst_set_t instSet>
   void genComputeBlockDirectConv(
-      x86::Emitter* a,
-      x86::Gp buffer_A,
-      x86::Gp buffer_B,
-      x86::Gp B_pf,
+      la64::Emitter* a,
+      la64::Gp buffer_A,
+      la64::Gp buffer_B,
+      la64::Gp B_pf,
       int rowRegs,
       int colRegs,
       int strideXich);
@@ -198,11 +193,11 @@ class DirectConvCodeGenBase {
    */
   template <inst_set_t instSet>
   void genComputeBlockDirectConvTrans(
-      x86::Emitter* a,
-      x86::Gp buffer_A,
-      x86::Gp buffer_B,
-      x86::Gp icReg,
-      x86::Gp C_offset,
+      la64::Emitter* a,
+      la64::Gp buffer_A,
+      la64::Gp buffer_B,
+      la64::Gp icReg,
+      la64::Gp C_offset,
       int rowRegs,
       int colRegs);
 };

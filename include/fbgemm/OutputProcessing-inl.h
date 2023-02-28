@@ -121,7 +121,7 @@ ReQuantizeOutput<FUSE_RELU, Q_GRAN, BIAS_TYPE, outT, inT, nextOPType>::f(
             std::min(255l, rounded));
       }
     }
-  } else if (instSet == inst_set_t::avx2 || instSet == inst_set_t::avx512) {
+  } else if (instSet == inst_set_t::lasx) {
     bool b_symmetric =
         (Q_GRAN == QuantizationGranularity::TENSOR && Bq_zero_point_[0] == 0) ||
         q_row_offsets_ == nullptr;
@@ -141,40 +141,40 @@ ReQuantizeOutput<FUSE_RELU, Q_GRAN, BIAS_TYPE, outT, inT, nextOPType>::f(
     if (Aq_zero_point_ == 0) {
       if (b_symmetric) {
         if (bias_ == nullptr) {
-          requantizeOutputProcessingAvx2<true, true, Q_GRAN, false, FUSE_RELU>(
+          requantizeOutputProcessingLasx<true, true, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeOutputProcessingAvx2<true, true, Q_GRAN, true, FUSE_RELU>(
+          requantizeOutputProcessingLasx<true, true, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       } else {
         if (bias_ == nullptr) {
-          requantizeOutputProcessingAvx2<true, false, Q_GRAN, false, FUSE_RELU>(
+          requantizeOutputProcessingLasx<true, false, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeOutputProcessingAvx2<true, false, Q_GRAN, true, FUSE_RELU>(
+          requantizeOutputProcessingLasx<true, false, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       }
     } else {
       if (b_symmetric) {
         if (bias_ == nullptr) {
-          requantizeOutputProcessingAvx2<false, true, Q_GRAN, false, FUSE_RELU>(
+          requantizeOutputProcessingLasx<false, true, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeOutputProcessingAvx2<false, true, Q_GRAN, true, FUSE_RELU>(
+          requantizeOutputProcessingLasx<false, true, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       } else {
         if (bias_ == nullptr) {
-          requantizeOutputProcessingAvx2<
+          requantizeOutputProcessingLasx<
               false,
               false,
               Q_GRAN,
               false,
               FUSE_RELU>(out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeOutputProcessingAvx2<false, false, Q_GRAN, true, FUSE_RELU>(
+          requantizeOutputProcessingLasx<false, false, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       }
@@ -259,36 +259,89 @@ inline int ReQuantizeForFloat<FUSE_RELU, Q_GRAN, outT, inT, nextOPType>::f(
     if (Aq_zero_point_ == 0) {
       if (b_symmetric) {
         if (bias_ == nullptr) {
-          requantizeForFloatAvx2<true, true, Q_GRAN, false, FUSE_RELU>(
+          requantizeForFloatLasx<true, true, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeForFloatAvx2<true, true, Q_GRAN, true, FUSE_RELU>(
+          requantizeForFloatLasx<true, true, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       } else {
         if (bias_ == nullptr) {
-          requantizeForFloatAvx2<true, false, Q_GRAN, false, FUSE_RELU>(
+          requantizeForFloatLasx<true, false, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeForFloatAvx2<true, false, Q_GRAN, true, FUSE_RELU>(
+          requantizeForFloatLasx<true, false, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       }
     } else {
       if (b_symmetric) {
         if (bias_ == nullptr) {
-          requantizeForFloatAvx2<false, true, Q_GRAN, false, FUSE_RELU>(
+          requantizeForFloatLasx<false, true, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeForFloatAvx2<false, true, Q_GRAN, true, FUSE_RELU>(
+          requantizeForFloatLasx<false, true, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       } else {
         if (bias_ == nullptr) {
-          requantizeForFloatAvx2<false, false, Q_GRAN, false, FUSE_RELU>(
+          requantizeForFloatLasx<false, false, Q_GRAN, false, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         } else {
-          requantizeForFloatAvx2<false, false, Q_GRAN, true, FUSE_RELU>(
+          requantizeForFloatLasx<false, false, Q_GRAN, true, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        }
+      }
+    }
+  } else if (instSet == inst_set_t::lasx) {
+    bool b_symmetric =
+        (Q_GRAN == QuantizationGranularity::TENSOR && Bq_zero_point_[0] == 0) ||
+        q_row_offsets_ == nullptr;
+
+    requantizationForFloatParams_t r = {
+        Aq_zero_point_,
+        Bq_zero_point_,
+        Aq_scale_,
+        Bq_scale_,
+        q_row_offsets_,
+        q_col_offsets_,
+        bias_,
+        ncols_,
+        groups_};
+
+    if (Aq_zero_point_ == 0) {
+      if (b_symmetric) {
+        if (bias_ == nullptr) {
+          requantizeForFloatLasx<true, true, Q_GRAN, false, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        } else {
+          requantizeForFloatLasx<true, true, Q_GRAN, true, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        }
+      } else {
+        if (bias_ == nullptr) {
+          requantizeForFloatLasx<true, false, Q_GRAN, false, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        } else {
+          requantizeForFloatLasx<true, false, Q_GRAN, true, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        }
+      }
+    } else {
+      if (b_symmetric) {
+        if (bias_ == nullptr) {
+          requantizeForFloatLasx<false, true, Q_GRAN, false, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        } else {
+          requantizeForFloatLasx<false, true, Q_GRAN, true, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        }
+      } else {
+        if (bias_ == nullptr) {
+          requantizeForFloatLasx<false, false, Q_GRAN, false, FUSE_RELU>(
+              out, inp, block, ld_out, ld_in, r);
+        } else {
+          requantizeForFloatLasx<false, false, Q_GRAN, true, FUSE_RELU>(
               out, inp, block, ld_out, ld_in, r);
         }
       }

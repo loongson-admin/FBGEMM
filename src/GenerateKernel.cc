@@ -8,19 +8,20 @@
 
 namespace fbgemm {
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 /**
  * Generate instructions for initializing the C registers to 0 in 32-bit
  * Accumulation kernel.
  */
-void initCRegs(x86::Emitter* a, int rowRegs, int colRegs) {
-  using CRegs = x86::Xmm;
+
+void initCRegs(la64::Emitter* a, int rowRegs, int colRegs) {
+  using CRegs = la64::VecX;
   // Take advantage of implicit zeroing out
   // i.e., zero out xmm and ymm will be zeroed out too
   for (int i = 0; i < rowRegs; ++i) {
     for (int j = 0; j < colRegs; ++j) {
-      a->vpxor(
+      a->xvxor_v(
           CRegs(i * colRegs + j),
           CRegs(i * colRegs + j),
           CRegs(i * colRegs + j));

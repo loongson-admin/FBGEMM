@@ -50,8 +50,7 @@ void fbgemmPacked(
   if (!cpuinfo_initialize()) {
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
-  if ((!fbgemmHasAvx512VnniSupport() && !fbgemmHasAvx512Support() &&
-       !fbgemmHasAvx2Support())) {
+  if ( !fbgemmHasLasxSupport() ) {
     assert(0 && "unknown architecure");
     throw std::runtime_error("unknown architecure");
   }
@@ -67,39 +66,11 @@ void fbgemmPacked(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(MCB, KCB, MR) = PackingTraits<
             typename packingAMatrix::inpType,
             typename packingAMatrix::accType,
-            inst_set_t::avx512_vnni>::getCacheBlockParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(MCB, KCB, MR) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512_vnni_ymm>::getCacheBlockParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(MCB, KCB, MR) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512>::getCacheBlockParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(MCB, KCB, MR) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512_ymm>::getCacheBlockParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(MCB, KCB, MR) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx2>::getCacheBlockParams();
+            inst_set_t::lasx>::getCacheBlockParams();
         break;
 
       default:
@@ -256,7 +227,7 @@ template FBGEMM_API bool fbgemmOptimizedGConv(const conv_param_t<2>& conv_p);
 template FBGEMM_API bool fbgemmOptimizedGConv(const conv_param_t<3>& conv_p);
 
 bool fbgemmSupportedCPU() {
-  return (cpuinfo_initialize() && fbgemmHasAvx2Support());
+  return (cpuinfo_initialize() && fbgemmHasLasxSupport());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

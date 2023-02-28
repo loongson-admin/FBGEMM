@@ -15,14 +15,15 @@
 #include <string>
 #include <tuple>
 #include "./CodeCache.h"
-#include "./MaskAvx2.h"
+#include "./MaskLasx.h"
 #include "./RefImplementations.h"
 #include "fbgemm/Utils.h"
+#include "./CodeGenHelpers.h"
 
 namespace fbgemm {
 
 namespace {
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 template <typename indxType = std::int64_t>
 class ReturnFunctionSignature {
@@ -36,7 +37,7 @@ class ReturnFunctionSignature {
       const indxType* indices, // indices of each row
       float epsilon,
       float lr,
-      const int* mask_avx2,
+      const int* mask_lasx,
       float weight_decay,
       const double* counter,
       std::int64_t counter_halflife);
@@ -44,25 +45,25 @@ class ReturnFunctionSignature {
 
 template <
     typename indxType = std::int64_t,
-    inst_set_t instSet = inst_set_t::avx2>
+    inst_set_t instSet = inst_set_t::lasx>
 class GenSparseAdagrad {
  public:
   GenSparseAdagrad() {}
   void genSparseAdagrad(
-      x86::Emitter* a,
+      la64::Emitter* a,
       int unroll_factor,
       int num_vec_regs_per_block,
       int remainder,
       int prefetch,
       typename simd_info<instSet>::vec_reg_t epsilon_vreg,
       typename simd_info<instSet>::vec_reg_t lr_vreg,
-      x86::Ymm mask_vreg,
+      la64::VecX mask_vreg,
       typename simd_info<instSet>::vec_reg_t temp_vreg,
       typename simd_info<instSet>::vec_reg_t weight_decay_vreg,
       bool has_weight_decay);
 
   void genRowwiseSparseAdagrad(
-      x86::Emitter* a,
+      la64::Emitter* a,
       int block_size,
       int unroll_factor,
       int num_vec_regs_per_block,
@@ -70,7 +71,7 @@ class GenSparseAdagrad {
       int prefetch,
       typename simd_info<instSet>::vec_reg_t epsilon_vreg,
       typename simd_info<instSet>::vec_reg_t lr_vreg,
-      x86::Ymm mask_vreg,
+      la64::VecX mask_vreg,
       typename simd_info<instSet>::vec_reg_t temp_vreg,
       typename simd_info<instSet>::vec_reg_t weight_decay_vreg,
       bool has_weight_decay);
@@ -98,16 +99,20 @@ class GenSparseAdagrad {
       codeCache_; ///< JIT Code Cache for reuse.
 
   // These are register we share accross SparseAdagrad and RowwiseSparseAdagrad
-  x86::Gp w;
-  x86::Gp g;
-  x86::Gp h;
-  x86::Gp indices;
-  x86::Gp base_offset;
-  x86::Gp temp1_; // loop counter
-  x86::Gp temp2_; // prefetch offset
-  x86::Gp temp3_; // prefetch offset of moment in rowwise adagrad
 
-  x86::KReg reduce_mask_avx512_;
+  la64::Gp w;
+  la64::Gp g;
+  la64::Gp h;
+  la64::Gp indices;
+  la64::Gp base_offset;
+  la64::Gp temp1_; // loop counter
+  la64::Gp temp2_; // prefetch offset
+  la64::Gp temp3_; // prefetch offset of moment in rowwise adagrad
+  la64::Gp temp_gp; // add
+  la64::Gp index_offset; //add
+  la64::VecX temp0_xv; // add
+  la64::VecX temp1_xv; // add
+
 }; // GenEmbeddingLookup
 
 template <typename indxType, inst_set_t instSet>
@@ -121,18 +126,17 @@ CodeCache<
 
 template <typename indxType, inst_set_t instSet>
 void GenSparseAdagrad<indxType, instSet>::genSparseAdagrad(
-    x86::Emitter* a,
+    la64::Emitter* a,
     int unroll_factor,
     int num_vec_regs_per_block,
     int remainder,
     int prefetch,
     typename simd_info<instSet>::vec_reg_t epsilon_vreg,
     typename simd_info<instSet>::vec_reg_t lr_vreg,
-    x86::Ymm mask_vreg,
+    la64::VecX mask_vreg,
     typename simd_info<instSet>::vec_reg_t temp_vreg,
     typename simd_info<instSet>::vec_reg_t weight_decay_vreg,
     bool has_weight_decay) {
-  // NOTE: temp_vreg is defined only when remainder is true and instSet == avx2
   typedef typename simd_info<instSet>::vec_reg_t vec_reg_t;
   constexpr int vlen = simd_info<instSet>::WIDTH_32BIT_ELEMS;
   for (int vec_idx = 0; vec_idx < num_vec_regs_per_block;
@@ -141,86 +145,96 @@ void GenSparseAdagrad<indxType, instSet>::genSparseAdagrad(
         std::min(unroll_factor, num_vec_regs_per_block - vec_idx);
 
     for (int v = 0; v < cur_unroll_factor; ++v) {
+      mov_imm(a, index_offset, (vec_idx + v) * vlen * sizeof(float));
+
       vec_reg_t out_vreg = vec_reg_t(v);
       vec_reg_t g_vreg = vec_reg_t(v + cur_unroll_factor);
 
       if (prefetch && ((vec_idx + v) % (64 / (vlen * sizeof(float))) == 0)) {
         // Intel SDE (wrongly) thinks prefetchwt1 is not available in BDW
-        a->prefetchw(
-            x86::dword_ptr(h, temp2_, 0, (vec_idx + v) * vlen * sizeof(float)));
+        a->add_d(temp_gp, h, temp2_);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->preld(8, temp_gp, 0);
 
-        a->prefetchw(
-            x86::dword_ptr(w, temp2_, 0, (vec_idx + v) * vlen * sizeof(float)));
+        a->add_d(temp_gp, w, temp2_);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->preld(8, temp_gp, 0);
       }
 
-      auto g_ptr = x86::dword_ptr(g, (vec_idx + v) * vlen * sizeof(float));
-      auto h_ptr = x86::dword_ptr(
-          h, base_offset, 0, (vec_idx + v) * vlen * sizeof(float));
-      auto w_ptr = x86::dword_ptr(
-          w, base_offset, 0, (vec_idx + v) * vlen * sizeof(float));
       if (remainder && vec_idx + v == num_vec_regs_per_block - 1) {
-        if (instSet == inst_set_t::avx2) {
-          a->vmaskmovps(g_vreg.ymm(), mask_vreg, g_ptr);
+          if (instSet == inst_set_t::lasx) {
+          a->add_d(temp_gp, g, index_offset);
+          a->xvld(g_vreg, la64::ptr(temp_gp));
+          a->xvand_v(g_vreg, g_vreg, mask_vreg);
+
           if (has_weight_decay) {
             // TODO(@taiqing) use a vreg for weights to avoid duplicate indexing
-            a->vmaskmovps(temp_vreg.ymm(), mask_vreg, w_ptr);
-            a->vfmadd231ps(g_vreg, temp_vreg, weight_decay_vreg);
+            a->add_d(temp_gp, w, base_offset);
+            a->add_d(temp_gp, temp_gp, index_offset);
+            a->xvld(temp_vreg, la64::ptr(temp_gp));
+            a->xvand_v(temp_vreg, temp_vreg, mask_vreg);
+
+            a->xvfmadd_s(g_vreg, temp_vreg, weight_decay_vreg, g_vreg);
           }
-          a->vmulps(out_vreg, g_vreg, g_vreg);
-          a->vmaskmovps(temp_vreg.ymm(), mask_vreg, h_ptr);
-          a->vaddps(out_vreg, out_vreg, temp_vreg);
 
-          a->vmaskmovps(h_ptr, mask_vreg, out_vreg.ymm());
+          a->xvfmul_s(out_vreg, g_vreg, g_vreg);
+          a->add_d(temp_gp, h, base_offset);
+          a->add_d(temp_gp, temp_gp, index_offset);
+          a->xvld(temp_vreg, la64::ptr(temp_gp));
+          a->xvand_v(temp_vreg, temp_vreg, mask_vreg);
+          a->xvfadd_s(out_vreg, out_vreg, temp_vreg);
 
-          a->vsqrtps(out_vreg, out_vreg);
-          a->vaddps(out_vreg, out_vreg, epsilon_vreg);
-
-          a->vmulps(g_vreg, lr_vreg, g_vreg);
-          a->vdivps(out_vreg, g_vreg, out_vreg);
-
-          a->vmaskmovps(temp_vreg.ymm(), mask_vreg, w_ptr);
-          a->vaddps(out_vreg, out_vreg, temp_vreg);
-
-          a->vmaskmovps(w_ptr, mask_vreg, out_vreg.ymm());
-        } else if (instSet == inst_set_t::avx512) {
-          a->k(x86::k(1)).vmovups(g_vreg, g_ptr);
-          if (has_weight_decay) {
-            a->k(x86::k(1)).vfmadd231ps(g_vreg, weight_decay_vreg, w_ptr);
+          for(int st_idx = 0; st_idx < remainder; st_idx++){
+            a->xvstelm_w(out_vreg, temp_gp, 0, st_idx);
+            a->addi_d(temp_gp, temp_gp, sizeof(float));
           }
-          a->k(x86::k(1)).vmulps(out_vreg, g_vreg, g_vreg);
-          a->k(x86::k(1)).vaddps(out_vreg, out_vreg, h_ptr);
+          a->xvfsqrt_s(out_vreg, out_vreg);
+          a->xvfadd_s(out_vreg, out_vreg, epsilon_vreg);
+          a->xvfmul_s(g_vreg, lr_vreg, g_vreg);
+          a->xvfdiv_s(out_vreg, g_vreg, out_vreg);
 
-          a->k(x86::k(1)).vmovups(h_ptr, out_vreg);
+          a->add_d(temp_gp, w, base_offset);
+          a->add_d(temp_gp, temp_gp, index_offset);
+          a->xvld(temp_vreg, la64::ptr(temp_gp));
+          a->xvand_v(temp_vreg, temp_vreg, mask_vreg);
+          a->xvfadd_s(out_vreg, out_vreg, temp_vreg);
 
-          a->k(x86::k(1)).vsqrtps(out_vreg, out_vreg);
-          a->k(x86::k(1)).vaddps(out_vreg, out_vreg, epsilon_vreg);
+          for(int st_idx = 0; st_idx < remainder; st_idx++){
+            a->xvstelm_w(out_vreg, temp_gp, 0, st_idx);
+            a->addi_d(temp_gp, temp_gp, sizeof(float));
+          }
 
-          a->k(x86::k(1)).vmulps(g_vreg, lr_vreg, g_vreg);
-          a->k(x86::k(1)).vdivps(out_vreg, g_vreg, out_vreg);
-
-          a->k(x86::k(1)).vaddps(out_vreg, out_vreg, w_ptr);
-
-          a->k(x86::k(1)).vmovups(w_ptr, out_vreg);
         }
       } else {
-        a->vmovups(g_vreg, g_ptr);
+        a->add_d(temp_gp, g, index_offset);
+        a->xvld(g_vreg, la64::ptr(temp_gp));
+
         if (has_weight_decay) {
-          a->vfmadd231ps(g_vreg, weight_decay_vreg, w_ptr);
+          // float gj = std::fma(weight_decay * freq, w_[j], g_[j]);
+          a->add_d(temp_gp, w, base_offset);
+          a->add_d(temp_gp, temp_gp, index_offset);
+          a->xvld(temp0_xv, la64::ptr(temp_gp));
+          a->xvfmadd_s(g_vreg, weight_decay_vreg, temp0_xv, g_vreg);
         }
-        a->vmulps(out_vreg, g_vreg, g_vreg);
-        a->vaddps(out_vreg, out_vreg, h_ptr);
 
-        a->vmovups(h_ptr, out_vreg);
+        a->xvfmul_s(out_vreg, g_vreg, g_vreg);
+        a->add_d(temp_gp, h, base_offset);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->xvld(temp0_xv, la64::ptr(temp_gp));
+        a->xvfadd_s(out_vreg, out_vreg, temp0_xv);
 
-        a->vsqrtps(out_vreg, out_vreg);
-        a->vaddps(out_vreg, out_vreg, epsilon_vreg);
+        a->xvst(out_vreg, la64::ptr(temp_gp));
+        a->xvfsqrt_s(out_vreg, out_vreg);
+        a->xvfadd_s(out_vreg, out_vreg, epsilon_vreg);
 
-        a->vmulps(g_vreg, lr_vreg, g_vreg);
-        a->vdivps(out_vreg, g_vreg, out_vreg);
+        a->xvfmul_s(g_vreg, lr_vreg, g_vreg);
+        a->xvfdiv_s(out_vreg, g_vreg, out_vreg);
+        a->add_d(temp_gp, w, base_offset);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->xvld(temp0_xv, la64::ptr(temp_gp));
+        a->xvfadd_s(out_vreg, out_vreg, temp0_xv);
 
-        a->vaddps(out_vreg, out_vreg, w_ptr);
-
-        a->vmovups(w_ptr, out_vreg);
+        a->xvst(out_vreg, la64::ptr(temp_gp));
       }
     }
   }
@@ -228,7 +242,7 @@ void GenSparseAdagrad<indxType, instSet>::genSparseAdagrad(
 
 template <typename indxType, inst_set_t instSet>
 void GenSparseAdagrad<indxType, instSet>::genRowwiseSparseAdagrad(
-    x86::Emitter* a,
+    la64::Emitter* a,
     int block_size,
     int unroll_factor,
     int num_vec_regs_per_block,
@@ -236,7 +250,7 @@ void GenSparseAdagrad<indxType, instSet>::genRowwiseSparseAdagrad(
     int prefetch,
     typename simd_info<instSet>::vec_reg_t epsilon_vreg,
     typename simd_info<instSet>::vec_reg_t lr_vreg,
-    x86::Ymm mask_vreg,
+    la64::VecX mask_vreg,
     typename simd_info<instSet>::vec_reg_t temp_vreg,
     typename simd_info<instSet>::vec_reg_t weight_decay_vreg,
     bool has_weight_decay) {
@@ -248,137 +262,147 @@ void GenSparseAdagrad<indxType, instSet>::genRowwiseSparseAdagrad(
   vec_reg_t partial_sum_vreg = vec_reg_t(unroll_factor);
 
   if (prefetch) {
-    a->prefetchw(x86::dword_ptr(h, temp3_));
+    a->add_d(temp_gp, h, temp3_);
+    a->preld(8, temp_gp, 0);
   }
 
   bool areIndices64b = std::is_same<indxType, std::int64_t>::value;
-  auto indices_ptr = areIndices64b
-      ? x86::qword_ptr(
-            indices, temp1_, 3) // use of 3 is to muliply by 8 (int64_t)
-      : x86::dword_ptr(
-            indices, temp1_, 2); // use of 2 is to muliply by 4 (int32_t)
+
   if (has_weight_decay) {
     // set base_offset for fetching w in the calculation of gradient square sum
-    a->imul(
-        areIndices64b ? base_offset : base_offset.r32(),
-        indices_ptr,
-        static_cast<asmjit::Imm>(block_size * sizeof(float)));
+    a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+    a->add_d(temp_gp, indices, temp_gp);
+    if(areIndices64b){
+      a->ld_d(temp_gp, la64::ptr(temp_gp));
+    }else{
+      a->ld_w(temp_gp, la64::ptr(temp_gp));
+    }
+    // base_offset <- offsetIdx = idx * block_size
+    mov_imm(a, base_offset, block_size * sizeof(float));
+    a->mul_d(base_offset, base_offset, temp_gp);
   }
 
-  // Even with avx512, we only need to use avx2 registers when computing
-  // partial_sum because some instructions we're using like vhaddps
-  // are only in avx2.
-  constexpr int vlen_avx2 = simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS;
-  int num_vec_regs_per_block_avx2 = (block_size + vlen_avx2 - 1) / vlen_avx2;
+  constexpr int vlen_lasx = simd_info<inst_set_t::lasx>::WIDTH_32BIT_ELEMS;
+  int num_vec_regs_per_block_lasx = (block_size + vlen_lasx - 1) / vlen_lasx;
 
-  // Use YMM/XMMs with smaller ids for AVX2 specific instructions like vhaddps
-  x86::Ymm partial_sum_vreg_avx2(0);
-  x86::Xmm partial_sum_xmm0(partial_sum_vreg_avx2.id());
+  la64::VecX partial_sum_vreg0(0);
 
-  a->vxorps(
-      partial_sum_vreg_avx2, partial_sum_vreg_avx2, partial_sum_vreg_avx2);
+  a->xvxor_v(partial_sum_vreg0, partial_sum_vreg0, partial_sum_vreg0);
 
   // TODO: need to do a tree-reduction to fully take advantage of unrolling
-  for (int vec_idx = 0; vec_idx < num_vec_regs_per_block_avx2;
+  for (int vec_idx = 0; vec_idx < num_vec_regs_per_block_lasx;
        vec_idx += unroll_factor - 1) {
     int cur_unroll_factor =
-        std::min(unroll_factor - 1, num_vec_regs_per_block_avx2 - vec_idx);
+        std::min(unroll_factor - 1, num_vec_regs_per_block_lasx - vec_idx);
+
     for (int v = 0; v < cur_unroll_factor; ++v) {
-      x86::Ymm out_vreg = x86::Ymm(v + 1);
+      mov_imm(a, index_offset, (vec_idx + v) * vlen_lasx * sizeof(float));
+
+      la64::VecX out_vreg = la64::VecX(v + 1);
+
       if (has_weight_decay && prefetch &&
-          ((vec_idx + v) % (64 / (vlen_avx2 * sizeof(float))) == 0)) {
-        a->prefetchw(x86::dword_ptr(
-            w, temp2_, 0, (vec_idx + v) * vlen_avx2 * sizeof(float)));
+          ((vec_idx + v) % (64 / (vlen_lasx * sizeof(float))) == 0)) {
+        a->add_d(temp_gp, w, temp2_);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->preld(8, temp_gp, 0);
       }
 
-      auto g_ptr = x86::dword_ptr(g, (vec_idx + v) * vlen_avx2 * sizeof(float));
-      auto w_ptr = x86::dword_ptr(
-          w, base_offset, 0, (vec_idx + v) * vlen_avx2 * sizeof(float));
-      if (block_size % simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS &&
-          vec_idx + v == num_vec_regs_per_block_avx2 - 1) {
-        if (instSet == inst_set_t::avx2) {
-          a->vmaskmovps(out_vreg, mask_vreg, g_ptr);
+      if (block_size % simd_info<inst_set_t::lasx>::WIDTH_32BIT_ELEMS &&
+          vec_idx + v == num_vec_regs_per_block_lasx - 1) {
+        if (instSet == inst_set_t::lasx) {
+          a->add_d(temp_gp, g, index_offset);
+          a->xvld(out_vreg, la64::ptr(temp_gp));
+          a->xvand_v(out_vreg, out_vreg, mask_vreg);
+
           if (has_weight_decay) {
-            a->vmaskmovps(temp_vreg.ymm(), mask_vreg, w_ptr);
-            a->vfmadd231ps(out_vreg, temp_vreg, weight_decay_vreg);
-          }
-        } else {
-          a->k(reduce_mask_avx512_).z().vmovups(out_vreg, g_ptr);
-          if (has_weight_decay) {
-            a->k(reduce_mask_avx512_)
-                .z()
-                .vfmadd231ps(out_vreg, weight_decay_vreg, w_ptr);
+            a->add_d(temp_gp, w, index_offset);
+            a->add_d(temp_gp, temp_gp, base_offset);
+            a->xvld(temp_vreg, la64::ptr(temp_gp));
+            a->xvand_v(temp_vreg, temp_vreg, mask_vreg);
+
+            a->xvfmadd_s(out_vreg, temp_vreg, weight_decay_vreg, out_vreg);
           }
         }
       } else {
-        a->vmovups(out_vreg, g_ptr);
+        a->add_d(temp_gp, g, index_offset);
+        a->xvld(out_vreg, la64::ptr(temp_gp));
+
         if (has_weight_decay) {
-          a->vfmadd231ps(out_vreg, weight_decay_vreg, w_ptr);
+          a->add_d(temp_gp, w, index_offset);
+          a->add_d(temp_gp, temp_gp, base_offset);
+          a->xvld(temp0_xv, la64::ptr(temp_gp));
+          a->xvfmadd_s(out_vreg, weight_decay_vreg, temp0_xv, out_vreg);
         }
       }
-      a->vmulps(out_vreg, out_vreg, out_vreg);
-      a->vaddps(partial_sum_vreg_avx2, partial_sum_vreg_avx2, out_vreg);
+      a->xvfmul_s(out_vreg, out_vreg, out_vreg);
+      a->xvfadd_s(partial_sum_vreg0, partial_sum_vreg0, out_vreg);
     }
   }
+
+  la64::VecX partial_sum_vreg1(1);
+
   // Reduce sum to 1 value
-  // __m256 partial_sum_2 = _mm256_hadd_ps(partial_sum, partial_sum);
-  // __m256 partial_sum_3 = _mm256_hadd_ps(partial_sum_2, partial_sum_2);
-  a->vhaddps(
-      partial_sum_vreg_avx2, partial_sum_vreg_avx2, partial_sum_vreg_avx2);
-  a->vhaddps(
-      partial_sum_vreg_avx2, partial_sum_vreg_avx2, partial_sum_vreg_avx2);
-
-  x86::Xmm partial_sum_xmm1(1);
-
-  //_mm_cvtss_f32(_mm256_castps256_ps128(partial_sum_3))
-  a->movss(partial_sum_xmm1, partial_sum_xmm0);
-  //_mm_cvtss_f32(_mm256_extractf128_ps(partial_sum_3, 1))
-  a->vextractf128(partial_sum_xmm0, partial_sum_vreg_avx2, 1);
-
-  // final_sum = _mm_cvtss_f32(_mm256_castps256_ps128(partial_sum_3)) +
-  //    _mm_cvtss_f32(_mm256_extractf128_ps(partial_sum_3, 1));
-  a->addss(partial_sum_xmm0, partial_sum_xmm1);
+  // compute final_sum
+  a->xvbsll_v(partial_sum_vreg1, partial_sum_vreg0, 0);
+  a->xvsrai_d(partial_sum_vreg0, partial_sum_vreg0, 32);
+  a->xvfadd_s(partial_sum_vreg0, partial_sum_vreg0, partial_sum_vreg1);
+  a->xvbsll_v(partial_sum_vreg1, partial_sum_vreg0, 0);
+  // partial_sum[0, 1, 2, 3]
+  a->xvpickve_w(temp0_xv, partial_sum_vreg1, 2);
+  a->fadd_s(partial_sum_vreg0, partial_sum_vreg0, temp0_xv);
+  // partial_sum[4, 5, 6, 7]
+  a->xvpickve_w(temp0_xv, partial_sum_vreg1, 4);
+  a->xvpickve_w(temp1_xv, partial_sum_vreg1, 6);
+  a->fadd_s(temp0_xv, temp0_xv, temp1_xv);
+  // partial_sum[0,1, ..., 7]
+  a->fadd_s(partial_sum_vreg0, temp0_xv, partial_sum_vreg0);
 
   // This fragment moves block size (N) to stack and bcasts it to xmm reg
-  a->lea(
-      x86::rsp,
-      x86::dword_ptr(x86::rsp, -1 * static_cast<int>(sizeof(int32_t))));
-  a->mov(x86::dword_ptr(x86::rsp), block_size);
-  a->vbroadcastss(
-      partial_sum_xmm1, x86::dword_ptr(x86::rsp)); // N is partial_sum_xmm1
-  a->vcvtdq2ps(partial_sum_xmm1, partial_sum_xmm1);
-  a->lea(x86::rsp, x86::dword_ptr(x86::rsp, sizeof(int32_t)));
+  mov_imm(a, temp_gp, block_size);
+  a->xvreplgr2vr_w(partial_sum_vreg1, temp_gp);
+  a->ffint_s_w(partial_sum_vreg1, partial_sum_vreg1);  // int32 -> float
 
   if (has_weight_decay) {
     // set base_offset for fetching h
-    a->imul(
-        areIndices64b ? base_offset : base_offset.r32(),
-        indices_ptr,
-        static_cast<asmjit::Imm>(sizeof(float)));
+    a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+    a->add_d(temp_gp, indices, temp_gp);
+    if(areIndices64b){
+      a->ld_d(temp_gp, la64::ptr(temp_gp));
+    }else{
+      a->ld_w(temp_gp, la64::ptr(temp_gp));
+    }
+    mov_imm(a, base_offset, sizeof(float));
+    a->mul_d(base_offset, base_offset, temp_gp);
   }
 
   // final_sum /= N
-  a->divss(partial_sum_xmm0, partial_sum_xmm1);
+  a->fdiv_s(partial_sum_vreg0, partial_sum_vreg0, partial_sum_vreg1);
   // load h
-  a->movss(partial_sum_xmm1, x86::dword_ptr(h, base_offset));
+  a->add_d(temp_gp, h, base_offset);
+  a->xvld(partial_sum_vreg1, la64::ptr(temp_gp));
   // *h + final_sum
-  a->addss(partial_sum_xmm0, partial_sum_xmm1);
+  a->fadd_s(partial_sum_vreg0, partial_sum_vreg0, partial_sum_vreg1);
   // store h
-  a->movss(x86::dword_ptr(h, base_offset), partial_sum_xmm0);
+  a->xvstelm_w(partial_sum_vreg0, temp_gp, 0, 0);
   // sqrt(hi)
-  a->sqrtss(partial_sum_xmm0, partial_sum_xmm0);
+  a->fsqrt_s(partial_sum_vreg0, partial_sum_vreg0);
   // bcast partial to all of ymm/zmm reg
-  a->vpbroadcastd(partial_sum_vreg, partial_sum_xmm0);
+  a->xvreplve0_w(partial_sum_vreg, partial_sum_vreg0);
   // lr / sqrt(hi) + epsilon
-  a->vaddps(partial_sum_vreg, partial_sum_vreg, epsilon_vreg);
-  a->vdivps(partial_sum_vreg, lr_vreg, partial_sum_vreg);
+  a->xvfadd_s(partial_sum_vreg, partial_sum_vreg, epsilon_vreg);
+  a->xvfdiv_s(partial_sum_vreg, lr_vreg, partial_sum_vreg);
   // partial_sum_vreg now has float_step
 
   // set base_offset for fetching w in updating weights
-  a->imul(
-      areIndices64b ? base_offset : base_offset.r32(),
-      indices_ptr,
-      static_cast<asmjit::Imm>(block_size * sizeof(float)));
+  a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+  a->add_d(temp_gp, indices, temp_gp);
+  if(areIndices64b){
+    a->ld_d(temp_gp, la64::ptr(temp_gp));
+  }else{
+    a->ld_w(temp_gp, la64::ptr(temp_gp));
+  }
+  mov_imm(a, base_offset, block_size * sizeof(float));
+  a->mul_d(base_offset, base_offset, temp_gp);
 
   for (int vec_idx = 0; vec_idx < num_vec_regs_per_block;
        vec_idx += unroll_factor) {
@@ -386,52 +410,64 @@ void GenSparseAdagrad<indxType, instSet>::genRowwiseSparseAdagrad(
         std::min(unroll_factor, num_vec_regs_per_block - vec_idx);
 
     for (int v = 0; v < cur_unroll_factor; ++v) {
+      mov_imm(a, index_offset, (vec_idx + v) * vlen * sizeof(float));
       vec_reg_t out_vreg = vec_reg_t(v);
 
       if (!has_weight_decay && prefetch &&
           ((vec_idx + v) % (64 / (vlen * sizeof(float))) == 0)) {
-        a->prefetchw(
-            x86::dword_ptr(w, temp2_, 0, (vec_idx + v) * vlen * sizeof(float)));
+        a->add_d(temp_gp, w, temp2_);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->preld(8, temp_gp, 0);
       }
 
-      auto g_ptr = x86::dword_ptr(g, (vec_idx + v) * vlen * sizeof(float));
-      auto w_ptr = x86::dword_ptr(
-          w, base_offset, 0, (vec_idx + v) * vlen * sizeof(float));
       if (remainder && vec_idx + v == num_vec_regs_per_block - 1) {
-        if (instSet == inst_set_t::avx2) {
-          a->vmaskmovps(temp_vreg.ymm(), mask_vreg, g_ptr);
+        if (instSet == inst_set_t::lasx) {
+          a->add_d(temp_gp, g, index_offset);
+          a->xvld(temp_vreg, la64::ptr(temp_gp));
+          a->xvand_v(temp_vreg, temp_vreg, mask_vreg);
+
           if (has_weight_decay) {
-            a->vmaskmovps(out_vreg.ymm(), mask_vreg, w_ptr);
+            a->add_d(temp_gp, w, base_offset);
+            a->add_d(temp_gp, temp_gp, index_offset);
+            a->xvld(out_vreg, la64::ptr(temp_gp));
+            a->xvand_v(out_vreg, out_vreg, mask_vreg);
+
             // TODO(@taiqing): have vreg for weights
-            a->vfmadd231ps(temp_vreg, weight_decay_vreg, out_vreg);
+            a->xvfmadd_s(temp_vreg, weight_decay_vreg, out_vreg, temp_vreg);
           }
-          a->vmulps(temp_vreg, partial_sum_vreg, temp_vreg);
+          a->xvfmul_s(temp_vreg, partial_sum_vreg, temp_vreg);
 
-          a->vmaskmovps(out_vreg.ymm(), mask_vreg, w_ptr);
-          a->vaddps(out_vreg, temp_vreg, out_vreg);
+          a->add_d(temp_gp, w, base_offset);
+          a->add_d(temp_gp, temp_gp, index_offset);
+          a->xvld(out_vreg, la64::ptr(temp_gp));
+          a->xvand_v(out_vreg, out_vreg, mask_vreg);
 
-          a->vmaskmovps(w_ptr, mask_vreg, out_vreg.ymm());
-        } else {
-          if (has_weight_decay) {
-            a->k(x86::k(1)).vmovups(out_vreg, g_ptr);
-            a->k(x86::k(1)).vfmadd231ps(out_vreg, weight_decay_vreg, w_ptr);
-            a->k(x86::k(1)).vmulps(out_vreg, partial_sum_vreg, out_vreg);
-          } else {
-            a->k(x86::k(1)).vmulps(out_vreg, partial_sum_vreg, g_ptr);
+          a->xvfadd_s(out_vreg, temp_vreg, out_vreg);
+          for(int st_idx = 0; st_idx < remainder; st_idx++){
+            a->xvstelm_w(out_vreg, temp_gp, 0, st_idx);
+            a->addi_d(temp_gp, temp_gp, sizeof(float));
           }
-          a->k(x86::k(1)).vaddps(out_vreg, out_vreg, w_ptr);
-          a->k(x86::k(1)).vmovups(w_ptr, out_vreg);
+
         }
       } else {
         if (has_weight_decay) {
-          a->vmovups(out_vreg, g_ptr);
-          a->vfmadd231ps(out_vreg, weight_decay_vreg, w_ptr);
-          a->vmulps(out_vreg, partial_sum_vreg, out_vreg);
+          a->add_d(temp_gp, g, index_offset);
+          a->xvld(out_vreg, la64::ptr(temp_gp));
+          a->add_d(temp_gp, w, base_offset);
+          a->add_d(temp_gp, temp_gp, index_offset);
+          a->xvld(temp0_xv, la64::ptr(temp_gp));
+          a->xvfmadd_s(out_vreg, weight_decay_vreg, temp0_xv, out_vreg);
+          a->xvfmul_s(out_vreg, partial_sum_vreg, out_vreg);
         } else {
-          a->vmulps(out_vreg, partial_sum_vreg, g_ptr);
+          a->add_d(temp_gp, g, index_offset);
+          a->xvld(out_vreg, la64::ptr(temp_gp));
+          a->xvfmul_s(out_vreg, out_vreg, partial_sum_vreg);
         }
-        a->vaddps(out_vreg, out_vreg, w_ptr);
-        a->vmovups(w_ptr, out_vreg);
+        a->add_d(temp_gp, w, base_offset);
+        a->add_d(temp_gp, temp_gp, index_offset);
+        a->xvld(temp0_xv, la64::ptr(temp_gp));
+        a->xvfadd_s(out_vreg, out_vreg, temp0_xv);
+        a->xvst(out_vreg, la64::ptr(temp_gp));
       }
     }
   }
@@ -453,8 +489,8 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
       typename ReturnFunctionSignature<indxType>::jit_sparse_adagrad_kernel {
         asmjit::CodeHolder code;
         code.init(runtime().environment());
-        x86::Assembler assembler(&code);
-        x86::Emitter* a = assembler.as<x86::Emitter>();
+        la64::Assembler assembler(&code);
+        la64::Emitter* a = assembler.as<la64::Emitter>();
         bool areIndices64b = std::is_same<indxType, std::int64_t>::value;
 #if defined(FBGEMM_LOG_CODE)
         std::string filename = "SparseAdagrad";
@@ -463,7 +499,7 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
           filename += "_rowwise";
         }
         filename += areIndices64b ? "_64bit" : "_32bit";
-        filename += instSet == inst_set_t::avx512 ? "_avx512" : "_avx2";
+        filename += instSet == inst_set_t::lasx ? "_lasx" : "loongarch";
         if (prefetch) {
           filename += "_prefetch";
         }
@@ -476,24 +512,25 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
         code.setLogger(codeLogger);
 #endif
 
-        x86::Gpd num_rows = a->zdi().r32();
-        x86::Gp param_size = a->zsi();
-        w = a->zdx();
-        g = a->zcx();
-        h = a->gpz(8);
-        indices = a->gpz(9);
-        x86::Xmm epsilon(0);
-        x86::Xmm lr(1);
-        x86::Gp mask_avx2 = a->gpz(10);
-        x86::Xmm weight_decay(2);
-        x86::Gp counter = a->gpz(11);
-        x86::Gp counter_halflife = a->gpz(12);
+        la64::Gp num_rows = la64::a0;
+        la64::Gp param_size = la64::a1;
+        w = la64::a2;
+        g = la64::a3;
+        h = la64::a4;
+        indices = la64::a5;
+        la64::VecV epsilon = la64::VecV(0);
+        la64::VecV lr = la64::VecV(1);
+        la64::Gp mask_lasx = la64::a6;
+        la64::VecV weight_decay = la64::VecV(2);
+        la64::Gp counter = la64::a7;
+        la64::Gp counter_halflife = la64::s0;
 
-        // reuse mask_avx2 because mask_avx2 is used only at the beginning
-        base_offset = a->gpz(10);
-        temp1_ = a->gpz(13);
-        temp2_ = a->gpz(14);
-        temp3_ = a->gpz(15);
+        base_offset = la64::a6;
+        temp1_ = la64::s1;
+        temp2_ = la64::s2;
+        temp3_ = la64::s3;
+        temp_gp = la64::s4;
+        index_offset = la64::s5;
 
         asmjit::FuncDetail func;
         func.init(
@@ -507,7 +544,7 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
                 const indxType*, // indices
                 float, // epsilon
                 float, // lr
-                const int*, // mask_avx2
+                const int*, // mask_
                 float, // weight_decay
                 const double*, // counter then counter_halflife
                 std::int64_t>(asmjit::CallConv::kIdHost),
@@ -516,23 +553,16 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
         asmjit::FuncFrame frame;
         frame.init(func);
 
-        if (instSet == inst_set_t::avx2) {
+        if (instSet == inst_set_t::lasx) {
           frame.setDirtyRegs(
-              x86::Reg::kGroupVec,
+              la64::Reg::kGroupVec,
               asmjit::Support::bitMask(0, 1, 2, 3, 4, 5, 6, 7) |
-                  asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15));
-        } else {
-          frame.setDirtyRegs(
-              x86::Reg::kGroupVec,
-              asmjit::Support::bitMask(0, 1, 2, 3, 4, 5, 6, 7) |
-                  asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15) |
-                  asmjit::Support::bitMask(16, 17, 18, 19, 20, 21, 22, 23) |
-                  asmjit::Support::bitMask(24, 25, 26, 27, 28, 29, 30, 31));
+                  asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15, 16, 17));
         }
 
         frame.setDirtyRegs(
-            x86::Reg::kGroupGp,
-            asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15));
+            la64::Reg::kGroupGp,
+            asmjit::Support::bitMask(23, 24, 25, 26, 27, 28, 29, 30, 31));
 
         asmjit::FuncArgsAssignment args(&func);
         args.assignAll(
@@ -544,7 +574,7 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
             indices,
             epsilon,
             lr,
-            mask_avx2,
+            mask_lasx,
             weight_decay,
             counter,
             counter_halflife);
@@ -567,9 +597,13 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
         vec_reg_t lr_vreg;
         vec_reg_t weight_decay_vreg;
         vec_reg_t adjusted_weight_decay_vreg;
-        x86::Ymm mask_vreg; // mask for avx2
-        vec_reg_t
-            temp_vreg; // temp vreg for avx2 to handle remainder computation
+        la64::VecX mask_vreg; // mask
+        vec_reg_t temp_vreg; // temp vreg to handle remainder computation
+
+        --unroll_factor;
+        temp0_xv = la64::VecX(unroll_factor);
+        --unroll_factor;
+        temp1_xv = la64::VecX(unroll_factor);
 
         --unroll_factor;
         epsilon_vreg = vec_reg_t(unroll_factor);
@@ -583,28 +617,18 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
         }
 
         if (remainder) {
-          if (instSet == inst_set_t::avx2) {
+          if (instSet == inst_set_t::lasx) {
             --unroll_factor;
             temp_vreg = vec_reg_t(unroll_factor);
-          }
+          // }
 
           // Creating masks for non multiples of vlen iterations
-          if (instSet == inst_set_t::avx2) {
+          // if (instSet == inst_set_t::lasx) {
             --unroll_factor;
-            mask_vreg = x86::Ymm(unroll_factor);
-            a->vmovups(mask_vreg, x86::dword_ptr(mask_avx2));
-          } else {
-            a->mov(temp1_, (1 << remainder) - 1);
-            a->kmovw(x86::k(1), temp1_);
+            mask_vreg = la64::VecX(unroll_factor);
+            a->xvld(mask_vreg, la64::ptr(mask_lasx));
+          // } else {
           }
-        }
-        // Need an extra mask for computing sum of gradients
-        int remainder_avx2 =
-            block_size % simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS;
-        if (remainder_avx2 && instSet == inst_set_t::avx512 && rowwise) {
-          reduce_mask_avx512_ = x86::k(2);
-          a->mov(temp1_, (1 << remainder_avx2) - 1);
-          a->kmovw(reduce_mask_avx512_, temp1_);
         }
 
         if (!rowwise) {
@@ -615,64 +639,58 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
         asmjit::Label LoopRangeIndexBegin = a->newLabel();
         asmjit::Label LoopRangeIndexEnd = a->newLabel();
 
-        a->vpbroadcastd(epsilon_vreg, epsilon);
-        a->vpbroadcastd(lr_vreg, lr);
+        a->vpickve2gr_w(temp_gp, epsilon, 0);
+        a->xvreplgr2vr_w(epsilon_vreg, temp_gp);
+        a->vpickve2gr_w(temp_gp, lr, 0);
+        a->xvreplgr2vr_w(lr_vreg, temp_gp);
         if (has_weight_decay) {
-          a->vpbroadcastd(weight_decay_vreg, weight_decay);
+          a->vpickve2gr_w(temp_gp, weight_decay, 0);
+          a->xvreplgr2vr_w(weight_decay_vreg, temp_gp);
         }
 
-        a->xor_(temp1_, temp1_);
+        a->xor_(temp1_, temp1_, temp1_);
 
         a->bind(LoopRangeIndexBegin);
-        a->cmp(temp1_.r32(), num_rows); // temp1_ is the loop trip counter
-        a->jge(LoopRangeIndexEnd);
+        a->bge(temp1_, num_rows, LoopRangeIndexEnd);
 
-        auto indices_ptr = areIndices64b
-            ? x86::qword_ptr(
-                  indices, temp1_, 3) // use of 3 is to muliply by 8 (int64_t)
-            : x86::dword_ptr(
-                  indices, temp1_, 2); // use of 2 is to muliply by 4 (int32_t)
-        a->imul(
-            areIndices64b ? base_offset : base_offset.r32(),
-            indices_ptr,
-            static_cast<asmjit::Imm>(
-                (rowwise ? 1 : block_size) * sizeof(float)));
-
-        // Perform this check
-        // if (block_size + offsetIdx > param_size) {
-        //   return i;
-        // }
+        a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+        a->add_d(temp_gp, indices, temp_gp);
+        // temp2_ <- idx = indices[i]
         if (areIndices64b) {
-          a->mov(temp2_, indices_ptr);
+          a->ld_d(temp2_, la64::ptr(temp_gp));
         } else {
-          a->mov(temp2_.r32(), indices_ptr);
+          a->ld_w(temp2_, la64::ptr(temp_gp));
         }
+        mov_imm(a, base_offset, (rowwise ? 1 : block_size) * sizeof(float));
+        a->mul_d(base_offset, base_offset, temp2_);
 
         if (has_weight_decay) {
           // Check counter != nullptr && counter[idx] > 0
-          a->vmovaps(adjusted_weight_decay_vreg, weight_decay_vreg);
+          a->xvbsll_v(adjusted_weight_decay_vreg, weight_decay_vreg, 0);
 
           asmjit::Label skip_adjust_freq = a->newLabel();
 
-          a->cmp(counter, 0);
-          a->je(skip_adjust_freq);
+          a->beq(la64::zero, counter, skip_adjust_freq);
 
           // temp3_ : counter[idx]
-          a->mov(temp3_, x86::qword_ptr(counter, temp2_, 3));
-          a->cmp(temp3_, 0);
-          a->jle(skip_adjust_freq);
+          a->slli_d(temp_gp, temp2_, 3);
+          a->add_d(temp_gp, counter, temp_gp);
+          a->ld_d(temp3_, la64::ptr(temp_gp));
+          a->bge(la64::zero, temp3_, skip_adjust_freq);
 
           // OK to use Xmm registers with small ids that are reserved for temp
           // values in the inner most loop.
-          vec_reg_t counter_halflife_vreg(0);
-          x86::Xmm counter_vreg(1);
-          a->cvtsi2sd(counter_halflife_vreg.xmm(), counter_halflife);
-          a->movq(counter_vreg, temp3_);
-          a->divpd(counter_halflife_vreg.xmm(), counter_vreg);
-          a->vcvtpd2ps(
-              counter_halflife_vreg.xmm(), counter_halflife_vreg.ymm());
-          a->vbroadcastss(counter_halflife_vreg, counter_halflife_vreg.xmm());
-          a->vmulps(
+          // vec_reg_t counter_halflife_vreg(0);
+          la64::VecX counter_halflife_vreg = la64::VecX(0);
+          la64::VecX counter_vreg = la64::VecX(1);
+
+          a->vinsgr2vr_d(temp0_xv, counter_halflife, 0);
+          a->ffint_d_l(counter_halflife_vreg, temp0_xv);
+          a->xvinsgr2vr_d(counter_vreg, temp3_, 0);
+          a->fdiv_d(counter_halflife_vreg, counter_halflife_vreg, counter_vreg);
+          a->fcvt_s_d(counter_halflife_vreg, counter_halflife_vreg);
+          a->xvreplve0_w(counter_halflife_vreg, counter_halflife_vreg);
+          a->xvfmul_s(
               adjusted_weight_decay_vreg,
               adjusted_weight_decay_vreg,
               counter_halflife_vreg);
@@ -680,48 +698,66 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
           a->bind(skip_adjust_freq);
         }
 
-        a->inc(temp2_);
-        a->imul(
-            temp2_,
-            static_cast<asmjit::Imm>(block_size)); //(offsetIdx+1)*blocksize
-        a->cmp(temp2_, param_size);
-        a->jg(exit);
+        a->addi_d(temp2_, temp2_, 1);
+        mov_imm(a, temp_gp, block_size);
+        a->mul_d(temp2_, temp2_, temp_gp);  // (idx + 1) * block_size
+        a->blt(param_size, temp2_, exit);
 
         if (prefetch) {
           asmjit::Label pref_dist_reset_start = a->newLabel();
           asmjit::Label pref_dist_reset_end = a->newLabel();
 
-          a->mov(temp2_, temp1_);
-          a->add(temp2_, prefetch);
-          a->cmp(temp2_.r32(), num_rows);
-          a->jge(pref_dist_reset_start);
+          a->add_d(temp2_, temp1_, la64::zero);
+          mov_imm(a, temp_gp, prefetch);
+          a->add_d(temp2_, temp2_, temp_gp);
+          a->bge(temp2_, num_rows, pref_dist_reset_start);
 
-          auto pref_indices_ptr = areIndices64b
-              ? x86::qword_ptr(indices, temp2_, 3)
-              : x86::dword_ptr(indices, temp2_, 2);
+
           if (rowwise) {
-            a->imul(
-                areIndices64b ? temp3_ : temp3_.r32(),
-                pref_indices_ptr,
-                static_cast<asmjit::Imm>(sizeof(float)));
+            a->slli_d(temp_gp, temp2_, areIndices64b ? 3:2);
+            a->add_d(temp_gp, temp_gp, indices);
+            if (areIndices64b) {
+              a->ld_d(temp_gp, la64::ptr(temp_gp));
+            } else {
+              a->ld_w(temp_gp, la64::ptr(temp_gp));
+            }
+            mov_imm(a, temp3_, sizeof(float));
+            a->mul_d(temp3_, temp3_, temp_gp);
           }
-          a->imul(
-              areIndices64b ? temp2_ : temp2_.r32(),
-              pref_indices_ptr,
-              static_cast<asmjit::Imm>(block_size * sizeof(float)));
+          a->slli_d(temp_gp, temp2_, areIndices64b ? 3:2);
+          a->add_d(temp_gp, temp_gp, indices);
+          if (areIndices64b) {
+            a->ld_d(temp_gp, la64::ptr(temp_gp));
+          } else {
+            a->ld_w(temp_gp, la64::ptr(temp_gp));
+          }
+          mov_imm(a, temp2_, block_size * sizeof(float));
+          a->mul_d(temp2_, temp2_, temp_gp);
 
-          a->jmp(pref_dist_reset_end);
+          a->b(pref_dist_reset_end);
 
           a->bind(pref_dist_reset_start);
-          a->imul(
-              areIndices64b ? temp2_ : temp2_.r32(),
-              indices_ptr,
-              static_cast<asmjit::Imm>(block_size * sizeof(float)));
+
+          a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+          a->add_d(temp_gp, indices, temp_gp);
+          if (areIndices64b) {
+            a->ld_d(temp_gp, la64::ptr(temp_gp));
+          } else {
+            a->ld_w(temp_gp, la64::ptr(temp_gp));
+          }
+          mov_imm(a, temp2_, block_size * sizeof(float));
+          a->mul_d(temp2_, temp2_, temp_gp);
+
           if (rowwise) {
-            a->imul(
-                areIndices64b ? temp3_ : temp3_.r32(),
-                indices_ptr,
-                static_cast<asmjit::Imm>(sizeof(float)));
+            a->slli_d(temp_gp, temp1_, areIndices64b ? 3:2);
+            a->add_d(temp_gp, indices, temp_gp);
+            if (areIndices64b) {
+              a->ld_d(temp_gp, la64::ptr(temp_gp));
+            } else {
+              a->ld_w(temp_gp, la64::ptr(temp_gp));
+            }
+            mov_imm(a, temp3_, sizeof(float));
+            a->mul_d(temp3_, temp3_, temp_gp);
           }
 
           a->bind(pref_dist_reset_end);
@@ -756,13 +792,15 @@ GenSparseAdagrad<indxType, instSet>::getOrCreate(
               has_weight_decay);
         }
 
-        a->add(g, static_cast<asmjit::Imm>(block_size * sizeof(float)));
-        a->inc(temp1_);
-        a->jmp(LoopRangeIndexBegin);
+        mov_imm(a, temp_gp, block_size * sizeof(float));
+        a->add_d(g, g, temp_gp);
+        a->addi_d(temp1_, temp1_, 1);
+        a->b(LoopRangeIndexBegin);
+
         a->bind(LoopRangeIndexEnd);
 
         a->bind(exit);
-        a->mov(x86::eax, temp1_.r32());
+        a->add_d(la64::a0, la64::zero, temp1_);  // return i
         a->emitEpilog(frame);
 
         typename ReturnFunctionSignature<indxType>::jit_sparse_adagrad_kernel
@@ -876,7 +914,7 @@ typename SparseAdaGradSignature<IndexType>::Type GenerateSparseAdaGrad(
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
 
-  if (fbgemmHasAvx512Support() || fbgemmHasAvx2Support()) {
+  if (fbgemmHasLasxSupport()) {
     if (block_size == 1) {
       return [=](int num_rows, // number of rows reading
                  std::uint64_t param_size, // total number of parameters
@@ -904,9 +942,9 @@ typename SparseAdaGradSignature<IndexType>::Type GenerateSparseAdaGrad(
             counter_halflife);
       };
     }
-    static GenSparseAdagrad<IndexType, inst_set_t::avx2> kernel_generator;
-    constexpr int VLEN = simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS;
-    const int* mask_avx2 = &internal::avx2_ps_or_epi32_combined_mask
+    static GenSparseAdagrad<IndexType, inst_set_t::lasx> kernel_generator;
+    constexpr int VLEN = simd_info<inst_set_t::lasx>::WIDTH_32BIT_ELEMS;
+    const int* mask_lasx = &internal::lasx_ps_or_epi32_combined_mask
                                [(VLEN - (block_size % VLEN)) % VLEN];
     const auto original_func = kernel_generator.getOrCreate(
         block_size, prefetch, rowwise, use_weight_decay);
@@ -930,14 +968,14 @@ typename SparseAdaGradSignature<IndexType>::Type GenerateSparseAdaGrad(
           indices, // indices of each row
           epsilon,
           lr,
-          mask_avx2,
+          mask_lasx,
           weight_decay,
           counter,
           counter_halflife);
     };
   } else {
 #ifdef VLOG
-    VLOG(0) << "AVX2 or AVX512 not found, taking the slow path";
+    VLOG(0) << "LASX not found, taking the slow path";
 #endif
     return [=](int num_rows, // number of rows reading
                std::uint64_t param_size, // total number of parameters

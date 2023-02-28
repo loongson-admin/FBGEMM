@@ -47,7 +47,7 @@ ExecuteKernel<
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
   if (params) {
-    if (fbgemmHasAvx2Support()) {
+    if (fbgemmHasLasxSupport()) {
       mbSize_ = params->MCB;
       nbSize_ = params->NCB;
       nrMinSize_ = params->NR_MIN;
@@ -60,39 +60,11 @@ ExecuteKernel<
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(mbSize_, nbSize_, nrMinSize_, nrSize_) = PackingTraits<
             typename packingAMatrix::inpType,
             typename packingAMatrix::accType,
-            inst_set_t::avx512_vnni>::getKernelParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(mbSize_, nbSize_, nrMinSize_, nrSize_) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512_vnni_ymm>::getKernelParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(mbSize_, nbSize_, nrMinSize_, nrSize_) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512>::getKernelParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(mbSize_, nbSize_, nrMinSize_, nrSize_) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx512_ymm>::getKernelParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(mbSize_, nbSize_, nrMinSize_, nrSize_) = PackingTraits<
-            typename packingAMatrix::inpType,
-            typename packingAMatrix::accType,
-            inst_set_t::avx2>::getKernelParams();
+            inst_set_t::lasx>::getKernelParams();
         break;
 
       default:
@@ -141,60 +113,8 @@ void ExecuteKernel<
 
   const inst_set_t isa = fbgemmInstructionSet();
   switch (isa) {
-    case inst_set_t::avx512_vnni:
-      if (std::is_same<typename packingAMatrix::accType, std::int16_t>::value) {
-        // For AVX512VNNI, we redirect int16_t to int32_t accumulation.
-        CodeGenBase<uint8_t, int8_t, int32_t, int32_t> codeObj;
-        fn = codeObj.getOrCreate<inst_set_t::avx512_vnni>(
-            accum,
-            packed_rows_A,
-            packedB_.blockColSize(),
-            packedA_.numPackedCols());
-      } else {
-        fn = BaseType::template getOrCreate<inst_set_t::avx512_vnni>(
-            accum,
-            packed_rows_A,
-            packedB_.blockColSize(),
-            packedA_.numPackedCols());
-      }
-      break;
-
-    case inst_set_t::avx512_vnni_ymm:
-      if (std::is_same<typename packingAMatrix::accType, std::int16_t>::value) {
-        // For AVX512VNNI, we redirect int16_t to int32_t accumulation.
-        CodeGenBase<uint8_t, int8_t, int32_t, int32_t> codeObj;
-        fn = codeObj.getOrCreate<inst_set_t::avx512_vnni_ymm>(
-            accum,
-            packed_rows_A,
-            packedB_.blockColSize(),
-            packedA_.numPackedCols());
-      } else {
-        fn = BaseType::template getOrCreate<inst_set_t::avx512_vnni_ymm>(
-            accum,
-            packed_rows_A,
-            packedB_.blockColSize(),
-            packedA_.numPackedCols());
-      }
-      break;
-
-    case inst_set_t::avx512:
-      fn = BaseType::template getOrCreate<inst_set_t::avx512>(
-          accum,
-          packed_rows_A,
-          packedB_.blockColSize(),
-          packedA_.numPackedCols());
-      break;
-
-    case inst_set_t::avx512_ymm:
-      fn = BaseType::template getOrCreate<inst_set_t::avx512_ymm>(
-          accum,
-          packed_rows_A,
-          packedB_.blockColSize(),
-          packedA_.numPackedCols());
-      break;
-
-    case inst_set_t::avx2:
-      fn = BaseType::template getOrCreate<inst_set_t::avx2>(
+    case inst_set_t::lasx:
+      fn = BaseType::template getOrCreate<inst_set_t::lasx>(
           accum,
           packed_rows_A,
           packedB_.blockColSize(),
@@ -218,44 +138,8 @@ void ExecuteKernel<
       int nc = ((packedB_.lastBcol() - 1) / nrMinSize_ + 1) * nrMinSize_;
       if (nc != nbSize_) {
         switch (isa) {
-          case inst_set_t::avx512_vnni:
-            if (std::is_same<typename packingAMatrix::accType, std::int16_t>::
-                    value) {
-              // For AVX512VNNI, we redirect int16_t to int32_t accumulation.
-              CodeGenBase<uint8_t, int8_t, int32_t, int32_t> codeObj;
-              fn = codeObj.getOrCreate<inst_set_t::avx512_vnni>(
-                  accum, packed_rows_A, nc, packedA_.numPackedCols());
-            } else {
-              fn = BaseType::template getOrCreate<inst_set_t::avx512_vnni>(
-                  accum, packed_rows_A, nc, packedA_.numPackedCols());
-            }
-            break;
-
-          case inst_set_t::avx512_vnni_ymm:
-            if (std::is_same<typename packingAMatrix::accType, std::int16_t>::
-                    value) {
-              // For AVX512VNNI, we redirect int16_t to int32_t accumulation.
-              CodeGenBase<uint8_t, int8_t, int32_t, int32_t> codeObj;
-              fn = codeObj.getOrCreate<inst_set_t::avx512_vnni_ymm>(
-                  accum, packed_rows_A, nc, packedA_.numPackedCols());
-            } else {
-              fn = BaseType::template getOrCreate<inst_set_t::avx512_vnni_ymm>(
-                  accum, packed_rows_A, nc, packedA_.numPackedCols());
-            }
-            break;
-
-          case inst_set_t::avx512:
-            fn = BaseType::template getOrCreate<inst_set_t::avx512>(
-                accum, packed_rows_A, nc, packedA_.numPackedCols());
-            break;
-
-          case inst_set_t::avx512_ymm:
-            fn = BaseType::template getOrCreate<inst_set_t::avx512_ymm>(
-                accum, packed_rows_A, nc, packedA_.numPackedCols());
-            break;
-
-          case inst_set_t::avx2:
-            fn = BaseType::template getOrCreate<inst_set_t::avx2>(
+          case inst_set_t::lasx:
+            fn = BaseType::template getOrCreate<inst_set_t::lasx>(
                 accum, packed_rows_A, nc, packedA_.numPackedCols());
             break;
 
@@ -321,10 +205,8 @@ void ExecuteKernel<
           (C_buffer_start == C_tile_.data() ? (jb - jb_begin) * nbSize_
                                             : (jb_end - jb_begin) * nbSize_);
       if (nSize) {
-        if (fbgemmHasAvx2Support()) {
-          // TODO: avx512 path
-          // Currently use avx2 code
-          outputProcess_.template f<inst_set_t::avx2>(
+         if (fbgemmHasLasxSupport()) {
+          outputProcess_.template f<inst_set_t::lasx>(
               matC_,
               C_buffer_row_start + jb_begin * nbSize_,
               {row_start_A,
@@ -343,10 +225,8 @@ void ExecuteKernel<
       if (C_buffer_start == C_tile_.data()) {
         // When C_tile_ scratchpad was used to avoid accessing memory past
         // C_buffer_ .
-        if (fbgemmHasAvx2Support()) {
-          // TODO: avx512 path
-          // Currently use avx2 code
-          outputProcess_.template f<inst_set_t::avx2>(
+        if (fbgemmHasLasxSupport()) {
+          outputProcess_.template f<inst_set_t::lasx>(
               matC_,
               C_tile_.data(),
               {row_start_A,
@@ -515,7 +395,7 @@ template class ExecuteKernel<
     PackAWithRowOffset<uint8_t, int16_t>,
     PackBMatrix<int8_t, int16_t>,
     float,
-    ReQuantizeForFloat<false /* FUSE_RELU*/>>;
+    ReQuantizeForFloat<false>>;
 
 ////////////////////////////////////////////////////////////////////////////////
 // DoSpmdmOnInpBuffer

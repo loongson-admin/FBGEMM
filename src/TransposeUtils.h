@@ -33,28 +33,14 @@ FBGEMM_API void transpose_ref(
 namespace internal {
 
 /**
- * @brief Transpose a matrix using Intel AVX2.
+ * @brief Transpose a matrix using LASX.
  *
- * This is called if the code is running on a CPU with Intel AVX2 support.
+ * This is called if the code is running on a CPU with LASX support.
  */
 template <typename T>
-void transpose_avx2(
+void transpose_lasx(
     unsigned M,
     unsigned N,
-    const T* src,
-    unsigned ld_src,
-    T* dst,
-    unsigned ld_dst);
-
-/**
- * @brief Transpose a matrix using Intel AVX512.
- *
- * This is called if the code is running on a CPU with Intel AVX512 support.
- */
-template <typename T>
-void transpose_avx512(
-    int64_t M,
-    int64_t N,
     const T* src,
     unsigned ld_src,
     T* dst,

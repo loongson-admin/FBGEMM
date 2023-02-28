@@ -18,7 +18,7 @@
 
 #include "./AlignedVec.h"
 #include "./BenchUtils.h"
-#include "fbgemm/FbgemmI8DepthwiseAvx2.h"
+#include "fbgemm/FbgemmI8DepthwiseLasx.h"
 #include "fbgemm/Utils.h"
 #include "src/RefImplementations.h"
 

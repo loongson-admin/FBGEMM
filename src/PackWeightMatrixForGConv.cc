@@ -52,20 +52,13 @@ int PackWeightMatrixForGConv<T, accT, SPATIAL_DIM>::numOfGroupsTogether(
     const conv_param_t<SPATIAL_DIM>& conv_param) {
   int OC_per_G = conv_param.OC / conv_param.G;
   int IC_per_G = conv_param.IC / conv_param.G;
-  if (fbgemmHasAvx512Support() || fbgemmHasAvx512VnniSupport()) {
-    // TODO: change to avx512 when avx512 support is available
+  if ( fbgemmHasLasxSupport() ) {
     return std::max(
-        simd_info<inst_set_t::avx512>::WIDTH_BYTES / OC_per_G /
-            std::max(IC_per_G, 4),
-        1);
-  } else {
-    // avx2
-    // e.g., IC_per_G == 4, we need to work on 2 groups at a time
-    return std::max(
-        simd_info<inst_set_t::avx2>::WIDTH_BYTES / OC_per_G /
+        simd_info<inst_set_t::lasx>::WIDTH_BYTES / OC_per_G /
             std::max(IC_per_G, 4),
         1);
   }
+
   return 1;
 }
 

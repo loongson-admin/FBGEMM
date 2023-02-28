@@ -54,6 +54,13 @@ FBGEMM_API void
 FloatToBfloat16_avx2(const float* src, bfloat16* dst, size_t size);
 
 /**
+ * @brief LASX implementation to convert fp32 numbers to bf16 numbers.
+ *
+ */
+FBGEMM_API void
+FloatToBfloat16_lasx(const float* src, bfloat16* dst, size_t size);
+
+/**
  * @brief AVX512 implementation to convert fp32 numbers to bf16 numbers.
  *
  */
@@ -66,6 +73,13 @@ FloatToBfloat16_avx512(const float* src, bfloat16* dst, size_t size);
  */
 FBGEMM_API void
 Bfloat16ToFloat_avx2(const bfloat16* src, float* dst, size_t size);
+
+/**
+ * @brief LASX implementation to convert bf16 numbers to fp32 numbers.
+ *
+ */
+FBGEMM_API void
+Bfloat16ToFloat_lasx(const bfloat16* src, float* dst, size_t size);
 
 /**
  * @brief AVX512 implementation to convert bf16 numbers to fp32 numbers.
@@ -119,7 +133,7 @@ Float16ToFloat_simd(const float16* src, float* dst, size_t size);
  * @brief AVX2 implementation to convert fp32 numbers to fp16 numbers.
  *
  */
-FBGEMM_API void FloatToFloat16_avx2(
+FBGEMM_API void FloatToFloat16_lasx(
     const float* src,
     float16* dst,
     size_t size,
@@ -140,7 +154,7 @@ FBGEMM_API void FloatToFloat16_avx512(
  *
  */
 FBGEMM_API void
-Float16ToFloat_avx2(const float16* src, float* dst, size_t size);
+Float16ToFloat_lasx(const float16* src, float* dst, size_t size);
 
 /**
  * @brief AVX512 implementation to convert fp16 numbers to fp32 numbers.

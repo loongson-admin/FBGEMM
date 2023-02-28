@@ -39,7 +39,7 @@ CodeCache<
     codeCache_;
 } // namespace
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 // c = a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3
 // A is in uint8_t
@@ -50,124 +50,180 @@ namespace x86 = asmjit::x86;
 // c2_v:  c[8:12], c[24:28]
 // c3_v: c[12:16], c[28:32]
 static void genMaddEpi16xNPacked(
-    x86::Emitter* e,
-    x86::Ymm a[4],
-    x86::Gp b,
-    x86::Ymm c[4],
-    x86::Ymm* a_sum,
+    la64::Emitter* e,
+    la64::VecX a[4],
+    la64::Gp b,
+    la64::VecX c[4],
+    la64::VecX* a_sum,
     int n,
     int remainder,
     bool accumulation,
-    x86::Ymm one_epi8,
-    x86::Ymm one_epi16,
-    x86::Ymm zero) {
+    la64::VecX one_epi8,
+    la64::VecX one_epi16,
+    la64::VecX zero,
+    la64::VecX tmpReg1_V_,
+    la64::VecX tmpReg2_V_) {
   // Interleave inputs corresponding to 4 filter positions.
   // Reuse a[1] and a[3] to save registers
-  x86::Ymm a01_lo(0), a01_hi(1), a23_lo(a[1]), a23_hi(a[3]);
-  e->vpunpcklbw(a01_lo, a[0], n == 1 ? zero : a[1]);
+  la64::VecX a01_lo(0), a01_hi(1), a23_lo(a[1]), a23_hi(a[3]);
+  e->xvilvl_b(a01_lo, n == 1 ? zero : a[1], a[0]);
   if (remainder >= 8) {
-    e->vpunpckhbw(a01_hi, a[0], n == 1 ? zero : a[1]);
+    e->xvilvh_b(a01_hi, n == 1 ? zero : a[1], a[0]);
   }
   if (n > 2) {
-    e->vpunpcklbw(a23_lo, a[2], n == 3 ? zero : a[3]);
+    e->xvilvl_b(a23_lo, n == 3 ? zero : a[3], a[2]);
     if (remainder >= 8) {
-      e->vpunpckhbw(a23_hi, a[2], n == 3 ? zero : a[3]);
+      e->xvilvh_b(a23_hi, n == 3 ? zero : a[3], a[2]);
     }
   }
 
   // Compute row_wise sum of A for row_offsets
   if (a_sum) {
     if (accumulation) {
-      e->vpmaddubsw(a[0], a01_lo, one_epi8);
-      e->vpaddsw(a_sum[0], a[0], a_sum[0]);
+      e->xvmulwev_h_bu_b (a[0], a01_lo, one_epi8);
+      e->xvmulwod_h_bu_b(tmpReg1_V_, a01_lo, one_epi8);
+      e->xvsadd_h(a[0], a[0], tmpReg1_V_);
+      e->xvsadd_h(a_sum[0], a[0], a_sum[0]);
 
       if (remainder >= 8) {
-        e->vpmaddubsw(a[2], a01_hi, one_epi8);
-        e->vpaddsw(a_sum[1], a[2], a_sum[1]);
+        e->xvmulwev_h_bu_b (a[2], a01_hi, one_epi8);
+        e->xvmulwod_h_bu_b(tmpReg1_V_, a01_hi, one_epi8);
+        e->xvsadd_h(a[2], a[2], tmpReg1_V_);
+        e->xvsadd_h(a_sum[1], a[2], a_sum[1]);
       }
     } else {
-      e->vpmaddubsw(a_sum[0], a01_lo, one_epi8);
+      e->xvmulwev_h_bu_b (a_sum[0], a01_lo, one_epi8);
+      e->xvmulwod_h_bu_b(tmpReg1_V_, a01_lo, one_epi8);
+      e->xvsadd_h(a_sum[0], a_sum[0], tmpReg1_V_);
       if (remainder >= 8) {
-        e->vpmaddubsw(a_sum[1], a01_hi, one_epi8);
+        e->xvmulwev_h_bu_b (a_sum[1], a01_hi, one_epi8);
+        e->xvmulwod_h_bu_b(tmpReg1_V_, a01_hi, one_epi8);
+        e->xvsadd_h(a_sum[1], a_sum[1], tmpReg1_V_);
       }
     }
 
     if (n > 2) {
-      e->vpmaddubsw(a[0], a23_lo, one_epi8);
-      e->vpaddsw(a_sum[0], a[0], a_sum[0]);
+      e->xvmulwev_h_bu_b (a[0], a23_lo, one_epi8);
+      e->xvmulwod_h_bu_b(tmpReg1_V_, a23_lo, one_epi8);
+      e->xvsadd_h(a[0], a[0], tmpReg1_V_);
+      e->xvsadd_h(a_sum[0], a[0], a_sum[0]);
 
       if (remainder >= 8) {
-        e->vpmaddubsw(a[2], a23_hi, one_epi8);
-        e->vpaddsw(a_sum[1], a[2], a_sum[1]);
+        e->xvmulwev_h_bu_b (a[2], a23_hi, one_epi8);
+        e->xvmulwod_h_bu_b(tmpReg1_V_, a23_hi, one_epi8);
+        e->xvsadd_h(a[2], a[2], tmpReg1_V_);
+        e->xvsadd_h(a_sum[1], a[2], a_sum[1]);
       }
     }
   }
 
   if (n > 2) {
     // Reusing a
-    e->vpunpcklwd(a[0], a01_lo, a23_lo);
-    e->vpunpckhwd(a[1], a01_lo, a23_lo);
+    e->xvilvl_h(a[0], a23_lo, a01_lo);
+    e->xvilvh_h(a[1], a23_lo, a01_lo);
     if (remainder >= 16) {
-      e->vpunpcklwd(a[2], a01_hi, a23_hi);
-      e->vpunpckhwd(a[3], a01_hi, a23_hi);
+      e->xvilvl_h(a[2], a23_hi, a01_hi);
+      e->xvilvh_h(a[3], a23_hi, a01_hi);
     }
 
-    e->vpmaddubsw(a[0], a[0], x86::ymmword_ptr(b));
-    e->vpmaddubsw(a[1], a[1], x86::ymmword_ptr(b, 32));
+    e->xvld(tmpReg1_V_, ptr(b));
+    e->xvmulwev_h_bu_b (tmpReg2_V_, a[0], tmpReg1_V_);
+    e->xvmulwod_h_bu_b(a[0], a[0], tmpReg1_V_);
+    e->xvsadd_h(a[0], a[0], tmpReg2_V_);
+
+    e->xvld(tmpReg1_V_, ptr(b, 32));
+    e->xvmulwev_h_bu_b (tmpReg2_V_, a[1], tmpReg1_V_);
+    e->xvmulwod_h_bu_b(a[1], a[1], tmpReg1_V_);
+    e->xvsadd_h(a[1], a[1], tmpReg2_V_);
+
     if (remainder >= 16) {
-      e->vpmaddubsw(a[2], a[2], x86::ymmword_ptr(b, 64));
-      e->vpmaddubsw(a[3], a[3], x86::ymmword_ptr(b, 96));
+      e->xvld(tmpReg1_V_, ptr(b, 64));
+      e->xvmulwev_h_bu_b (tmpReg2_V_, a[2], tmpReg1_V_);
+      e->xvmulwod_h_bu_b(a[2], a[2], tmpReg1_V_);
+      e->xvsadd_h(a[2], a[2], tmpReg2_V_);
+
+      e->xvld(tmpReg1_V_, ptr(b, 96));
+      e->xvmulwev_h_bu_b (tmpReg2_V_, a[3], tmpReg1_V_);
+      e->xvmulwod_h_bu_b(a[3], a[3], tmpReg1_V_);
+      e->xvsadd_h(a[3], a[3], tmpReg2_V_);
     }
 
     if (accumulation) {
-      e->vpmaddwd(a[0], a[0], one_epi16);
-      e->vpaddd(c[0], c[0], a[0]);
-      e->vpmaddwd(a[1], a[1], one_epi16);
-      e->vpaddd(c[1], c[1], a[1]);
+      e->xvmulwev_w_h (tmpReg1_V_, a[0], one_epi16);
+      e->xvmaddwod_w_h(tmpReg1_V_, a[0], one_epi16);
+      e->xvor_v(a[0], tmpReg1_V_, tmpReg1_V_);
+      e->xvadd_w(c[0], c[0], a[0]);
+      e->xvmulwev_w_h (tmpReg1_V_, a[1], one_epi16);
+      e->xvmaddwod_w_h(tmpReg1_V_, a[1], one_epi16);
+      e->xvor_v(a[1], tmpReg1_V_, tmpReg1_V_);
+      e->xvadd_w(c[1], c[1], a[1]);
 
       if (remainder >= 16) {
-        e->vpmaddwd(a[2], a[2], one_epi16);
-        e->vpaddd(c[2], c[2], a[2]);
-        e->vpmaddwd(a[3], a[3], one_epi16);
-        e->vpaddd(c[3], c[3], a[3]);
+        e->xvmulwev_w_h (tmpReg1_V_, a[2], one_epi16);
+        e->xvmaddwod_w_h(tmpReg1_V_, a[2], one_epi16);
+        e->xvor_v(a[2], tmpReg1_V_, tmpReg1_V_);
+        e->xvadd_w(c[2], c[2], a[2]);
+
+        e->xvmulwev_w_h (tmpReg1_V_, a[3], one_epi16);
+        e->xvmaddwod_w_h(tmpReg1_V_, a[3], one_epi16);
+        e->xvor_v(a[3], tmpReg1_V_, tmpReg1_V_);
+        e->xvadd_w(c[3], c[3], a[3]);
       }
     } else {
-      e->vpmaddwd(c[0], a[0], one_epi16);
-      e->vpmaddwd(c[1], a[1], one_epi16);
+      e->xvmulwev_w_h (c[0], a[0], one_epi16);
+      e->xvmaddwod_w_h(c[0], a[0], one_epi16);
+
+      e->xvmulwev_w_h (c[1], a[1], one_epi16);
+      e->xvmaddwod_w_h(c[1], a[1], one_epi16);
 
       if (remainder >= 16) {
-        e->vpmaddwd(c[2], a[2], one_epi16);
-        e->vpmaddwd(c[3], a[3], one_epi16);
+        e->xvmulwev_w_h (c[2], a[2], one_epi16);
+        e->xvmaddwod_w_h(c[2], a[2], one_epi16);
+        e->xvmulwev_w_h (c[3], a[3], one_epi16);
+        e->xvmaddwod_w_h(c[3], a[3], one_epi16);
       }
     }
   } else {
     // Reusing a
-    e->vpmaddubsw(a[0], a01_lo, x86::ymmword_ptr(b));
-    e->vpmaddubsw(a[1], a01_hi, x86::ymmword_ptr(b, 32));
+    e->xvld(tmpReg1_V_, ptr(b));
+    e->xvmulwev_h_bu_b (a[0], a01_lo, tmpReg1_V_);
+    e->xvmulwod_h_bu_b(tmpReg2_V_, a01_lo, tmpReg1_V_);
+    e->xvsadd_h(a[0], a[0], tmpReg2_V_);
+
+    e->xvld(tmpReg1_V_, ptr(b, 32));
+    e->xvmulwev_h_bu_b (a[1], a01_hi, tmpReg1_V_);
+    e->xvmulwod_h_bu_b(tmpReg2_V_, a01_hi, tmpReg1_V_);
+    e->xvsadd_h(a[1], a[1], tmpReg2_V_);
 
     if (accumulation) {
-      e->vpmovsxwd(a[2], a[0].half());
-      e->vpaddd(c[0], c[0], a[2]);
-      e->vpmovsxwd(a[3], a[1].half());
-      e->vpaddd(c[1], c[1], a[3]);
+      e->xvpermi_d(tmpReg1_V_, a[0], 0x10);
+      e->xvsllwil_w_h(a[2], tmpReg1_V_, 0);
+
+      e->xvadd_w(c[0], c[0], a[2]);
+
+      e->xvpermi_d(tmpReg1_V_, a[1], 0x10);
+      e->xvsllwil_w_h(a[3], tmpReg1_V_, 0);
+      e->xvadd_w(c[1], c[1], a[3]);
 
       if (remainder >= 16) {
-        e->vextracti128(a[0].half(), a[0], asmjit::Imm(1));
-        e->vpmovsxwd(a[0], a[0].half());
-        e->vpaddd(c[2], c[2], a[0]);
-        e->vextracti128(a[1].half(), a[1], asmjit::Imm(1));
-        e->vpmovsxwd(a[1], a[1].half());
-        e->vpaddd(c[3], c[3], a[1]);
+        e->xvpermi_d(a[0], a[0], 0x32);
+        e->xvsllwil_w_h(a[0], a[0], 0);
+        e->xvadd_w(c[2], c[2], a[0]);
+        e->xvpermi_d(a[1], a[1], 0x32);
+        e->xvsllwil_w_h(a[1], a[1], 0);
+        e->xvadd_w(c[3], c[3], a[1]);
       }
     } else {
-      e->vpmovsxwd(c[0], a[0].half());
-      e->vpmovsxwd(c[1], a[1].half());
+      e->xvpermi_d(tmpReg1_V_, a[0], 0x10);
+      e->xvsllwil_w_h(c[0], tmpReg1_V_, 0);
+      e->xvpermi_d(tmpReg1_V_, a[1], 0x10);
+      e->xvsllwil_w_h(c[1], tmpReg1_V_, 0);
 
       if (remainder >= 16) {
-        e->vextracti128(a[0].half(), a[0], asmjit::Imm(1));
-        e->vpmovsxwd(c[2], a[0].half());
-        e->vextracti128(a[1].half(), a[1], asmjit::Imm(1));
-        e->vpmovsxwd(c[3], a[1].half());
+        e->xvpermi_d(tmpReg1_V_, a[0], 0x32);
+        e->xvsllwil_w_h(c[2], tmpReg1_V_, 0);
+        e->xvpermi_d(tmpReg1_V_, a[1], 0x32);
+        e->xvsllwil_w_h(c[3], tmpReg1_V_, 0);
       }
     }
   }
@@ -204,8 +260,8 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
   return codeCache_.getOrCreate(kernelSig, [&]() -> jit_kernel_signature {
     asmjit::CodeHolder code;
     code.init(runtime().environment());
-    x86::Assembler assembler(&code);
-    x86::Emitter* e = assembler.as<x86::Emitter>();
+    la64::Assembler assembler(&code);
+    la64::Emitter* e = assembler.as<la64::Emitter>();
 #ifdef FBGEMM_LOG_CODE
     std::string filename = "dwconv_" + std::to_string(D) + "d_";
     for (int i = 3 - D; i < 3; ++i) {
@@ -245,18 +301,22 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
     code.setLogger(codeLogger);
 #endif
 
-    x86::Gp a_addr = e->zdi();
-    x86::Gp b_addr = e->zsi();
-    x86::Gp c_addr = e->zdx();
-    x86::Gp a_sum_addr = e->zcx();
-    x86::Gp h = e->gpz(8);
-    x86::Gp w = e->gpz(9);
-    x86::Gp ic = e->gpz(10);
-    x86::Gp mask_addr = e->gpz(11);
-    x86::Gp a_zero_point = e->gpz(12);
-    x86::Gp b_zero_point_addr = e->gpz(13);
-    x86::Gp ic_loop_count = e->gpz(14);
-    x86::Gp a_addr_save = e->gpz(15);
+    la64::Gp a_addr = la64::a0;
+    la64::Gp b_addr = la64::a1;
+    la64::Gp c_addr = la64::a2;
+    la64::Gp a_sum_addr = la64::a3;
+    la64::Gp h = la64::a4;
+    la64::Gp w = la64::a5;
+    la64::Gp ic = la64::a6;
+    la64::Gp mask_addr = la64::a7;
+    la64::Gp a_zero_point = la64::s0;
+    la64::Gp b_zero_point_addr = la64::s1;
+    la64::Gp ic_loop_count = la64::s2;
+    la64::Gp a_addr_save = la64::s3;
+
+    la64::Gp   tmpReg1_Gp_ = la64::s4;
+    la64::VecX tmpReg1_V_ = la64::VecX(16);
+    la64::VecX tmpReg2_V_ = la64::VecX(17);
 
     asmjit::FuncDetail func;
     func.init(
@@ -278,12 +338,12 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
     frame.init(func);
 
     frame.setDirtyRegs(
-        x86::Reg::kGroupVec,
+        la64::Reg::kGroupVec,
         asmjit::Support::bitMask(0, 1, 2, 3, 4, 5, 6, 7) |
-            asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15));
+            asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18));
     frame.setDirtyRegs(
-        x86::Reg::kGroupGp,
-        asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15));
+        la64::Reg::kGroupGp,
+        asmjit::Support::bitMask(23, 24, 25, 26, 27));
 
     asmjit::FuncArgsAssignment args(&func);
     args.assignAll(
@@ -305,44 +365,44 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
     e->emitArgsAssignment(frame, args);
 
     // Assign vector registers
-    x86::Ymm a[4];
-    x86::Ymm c[4];
-    x86::Ymm a_sum[2];
+    la64::VecX a[4];
+    la64::VecX c[4];
+    la64::VecX a_sum[2];
 
     int vreg_id = 2; // reserve 2 for temp vreg
     for (int i = 0; i < 4; ++i, ++vreg_id) {
-      a[i] = x86::Ymm(vreg_id);
+      a[i] = la64::VecX(vreg_id);
     }
     for (int i = 0; i < 4; ++i, ++vreg_id) {
-      c[i] = x86::Ymm(vreg_id);
+      c[i] = la64::VecX(vreg_id);
     }
     if (compute_a_sum) {
-      a_sum[0] = x86::Ymm(vreg_id);
+      a_sum[0] = la64::VecX(vreg_id);
       ++vreg_id;
-      a_sum[1] = x86::Ymm(vreg_id);
+      a_sum[1] = la64::VecX(vreg_id);
       ++vreg_id;
     }
-    x86::Ymm mask_vreg(vreg_id);
-    constexpr int vlen = simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS;
-    if (remainder != simd_info<inst_set_t::avx2>::WIDTH_BYTES) {
+    la64::VecX mask_vreg(vreg_id);
+    constexpr int vlen = simd_info<inst_set_t::lasx>::WIDTH_32BIT_ELEMS;
+    if (remainder != simd_info<inst_set_t::lasx>::WIDTH_BYTES) {
       ++vreg_id;
-      e->vmovups(
+      e->xvld(
           mask_vreg,
-          x86::ymmword_ptr(
+          ptr(
               mask_addr,
-              (vlen - remainder / 4 / oc_per_g) % vlen * sizeof(int32_t)));
+              (vlen - remainder / 4 / oc_per_g) % vlen * sizeof(int32_t)));  // *4, aligned default?
     }
-    x86::Ymm one_epi8(vreg_id);
+    la64::VecX one_epi8(vreg_id);
     if (compute_a_sum) {
       ++vreg_id;
       gen8BitVectorOne(e, one_epi8);
     }
 
     int K = std::accumulate(F.begin(), F.end(), 1, std::multiplies<int>());
-    x86::Ymm one_epi16(vreg_id);
+    la64::VecX one_epi16(vreg_id);
     if (K > 2) {
       ++vreg_id;
-      gen16BitVectorOne<inst_set_t::avx2, x86::Ymm>(e, one_epi16);
+      gen16BitVectorOne<inst_set_t::lasx, la64::VecX>(e, one_epi16);
     }
 
     bool has_pad = prev_skip || next_skip || top_skip || bottom_skip ||
@@ -351,49 +411,49 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
     // When out of registers, zero and A_zero_point_vreg need to share.
     bool recompute_zero = vreg_id == 15 && need_zero;
 
-    x86::Ymm a_zero_point_vreg(vreg_id);
+    la64::VecX a_zero_point_vreg(vreg_id);
     if (!recompute_zero && has_pad) {
-      e->movq(a_zero_point_vreg.half(), a_zero_point);
-      e->vpbroadcastb(a_zero_point_vreg, a_zero_point_vreg.half());
+      e->xvreplgr2vr_b(a_zero_point_vreg, a_zero_point);
     }
     if (vreg_id < 15) {
       ++vreg_id;
     }
-    x86::Ymm zero(vreg_id);
+    la64::VecX zero(vreg_id);
     if (need_zero && (!recompute_zero || !has_pad)) {
-      e->vpxor(zero.xmm(), zero.xmm(), zero.xmm());
+      e->xvxor_v(zero, zero, zero);
     }
 
     // Assign scalar registers
-    e->imul(w, ic);
-    e->imul(h, w);
+    e->mul_d(w, w, ic);
+    e->mul_d(h, h, w);
     if (D >= 3) {
-      e->mov(a_addr_save, w);
-      e->imul(a_addr_save, F[1]);
-      e->sub(h, a_addr_save); // h * w * ic - F[1] * w * ic
+      e->add_d(a_addr_save, w, la64::zero);
+      mov_imm(e, tmpReg1_Gp_, F[1]);
+      e->mul_d(a_addr_save, a_addr_save, tmpReg1_Gp_);
+      e->sub_d(h, h, a_addr_save); // h * w * ic - F[1] * w * ic
     }
-    e->mov(a_addr_save, ic);
-    e->imul(a_addr_save, F[2]);
-    e->sub(w, a_addr_save); // w * ic - F[2] * ic
+    e->add_d(a_addr_save, ic, la64::zero);
+    mov_imm(e, tmpReg1_Gp_, F[2]);
+    e->mul_d(a_addr_save, a_addr_save, tmpReg1_Gp_);
+    e->sub_d(w, w, a_addr_save); // w * ic - F[2] * ic
 
-    e->mov(ic_loop_count, ic);
-    e->add(ic_loop_count, asmjit::Imm(32 / oc_per_g - 1));
-    e->sar(ic_loop_count, asmjit::Imm(oc_per_g == 1 ? 5 : 4));
+    e->add_d(ic_loop_count, ic, la64::zero);
+    e->addi_d(ic_loop_count, ic_loop_count, asmjit::Imm(32 / oc_per_g - 1));
+    e->srai_d(ic_loop_count, ic_loop_count, asmjit::Imm(oc_per_g == 1 ? 5 : 4));
 
-    e->mov(a_addr_save, a_addr);
+    e->add_d(a_addr_save, a_addr, la64::zero);
     asmjit::Label ic_loop_begin = e->newLabel(), ic_loop_end = e->newLabel();
 
     // main_loop == false: the last vector iteration across input channels
     for (bool main_loop : {true, false}) {
       if (main_loop) {
         e->bind(ic_loop_begin);
-        e->dec(ic_loop_count);
-        e->jle(ic_loop_end);
+        e->addi_d(ic_loop_count, ic_loop_count, -1);
+        e->bge(la64::zero, ic_loop_count, ic_loop_end);
       }
 
       if (recompute_zero && has_pad) {
-        e->movq(a_zero_point_vreg.half(), a_zero_point);
-        e->vpbroadcastb(a_zero_point_vreg, a_zero_point_vreg.half());
+        e->xvreplgr2vr_b(a_zero_point_vreg, a_zero_point);
       }
 
       int i = 0;
@@ -414,28 +474,29 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
 
             // Load A
             if (pad) {
-              e->vmovups(a[i % 4], a_zero_point_vreg);
+              e->xvor_v(a[i % 4], a_zero_point_vreg, a_zero_point_vreg);
             } else {
               if (oc_per_g == 1) {
                 if (!main_loop && remainder != 32) {
-                  e->vmaskmovps(a[i % 4], mask_vreg, x86::ymmword_ptr(a_addr));
+                  e->xvld(a[i % 4], ptr(a_addr));
+                  e->xvand_v(a[i % 4], a[i % 4], mask_vreg);  //mask word MUST be 0/-1
                 } else {
-                  e->vmovups(a[i % 4], x86::ymmword_ptr(a_addr));
+                  e->xvld(a[i % 4], ptr(a_addr));
                 }
               } else {
                 assert(oc_per_g == 2);
                 if (!main_loop && remainder != 32) {
-                  e->vmaskmovps(
-                      a[i % 4].half(),
-                      mask_vreg.half(),
-                      x86::xmmword_ptr(a_addr));
+                  e->vld(a[i % 4].half(), ptr(a_addr));
+                  e->vand_v(a[i % 4].half(), a[i % 4].half(), mask_vreg.half());  //mask word MUST be 0/-1
                 } else {
-                  e->vmovups(a[i % 4].half(), x86::xmmword_ptr(a_addr));
+                  e->vld(a[i % 4], ptr(a_addr));
                 }
                 // Duplicate each byte.
-                e->vpmovzxbw(a[i % 4], a[i % 4].half());
-                e->vpsllw(x86::ymm(i % 2), a[i % 4], asmjit::Imm(8));
-                e->vpaddw(a[i % 4], a[i % 4], x86::ymm(i % 2));
+                e->xvpermi_d(a[i % 4], a[i % 4], 0x40);
+                e->xvexth_hu_bu(a[i % 4], a[i % 4]);
+
+                e->xvslli_h(la64::VecX(i % 2), a[i % 4], asmjit::Imm(8));
+                e->xvadd_h(a[i % 4], a[i % 4], la64::VecX(i % 2));
               }
             }
 
@@ -443,7 +504,7 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
             if (i % 4 == 3 || i == K - 1) {
               if (i == K - 1 && (i / 4 * 4 == K - 3 || i / 4 * 4 == K - 1)) {
                 if (recompute_zero && has_pad) {
-                  e->vpxor(zero.xmm(), zero.xmm(), zero.xmm());
+                  e->xvxor_v(zero, zero, zero);
                 }
               }
 
@@ -458,96 +519,102 @@ GenI8Depthwise::jit_kernel_signature GenI8Depthwise::getOrCreate(
                   /*accumulation=*/i / 4 > 0,
                   one_epi8,
                   one_epi16,
-                  zero);
+                  zero,
+                  tmpReg1_V_,
+                  tmpReg2_V_);
 
               if (i != K - 1) {
-                e->add(b_addr, asmjit::Imm(32 * 4));
+                e->addi_d(b_addr, b_addr, asmjit::Imm(32 * 4));
               } else if (main_loop) {
-                e->add(b_addr, asmjit::Imm(32 * (K - i / 4 * 4 + 1) / 2 * 2));
+                e->addi_d(b_addr, b_addr, asmjit::Imm(32 * (K - i / 4 * 4 + 1) / 2 * 2));
               }
 
               if (K - i / 4 * 4 >= 3 && K - i / 4 * 4 <= 6) {
                 for (int r = 0; r < (main_loop ? 4 : remainder / 8); ++r) {
                   // fix? output layout (see genMaddEpi16xNPacked for details)
-                  e->vperm2f128(
+                  e->xvor_v(a[r], c[r % 2 * 2 + 1], c[r % 2 * 2 + 1]);
+                  e->xvpermi_q(
                       a[r],
                       c[r % 2 * 2],
-                      c[r % 2 * 2 + 1],
                       asmjit::Imm(r < 2 ? 0x20 : 0x31));
                 }
                 for (int r = 0; r < (main_loop ? 4 : remainder / 8); ++r) {
-                  e->vmovdqa(c[r], a[r]);
+                  e->xvor_v(c[r], a[r], a[r]);
                 }
               }
             }
             if (i != K - 1) {
-              e->add(a_addr, ic); // advance to next pixel
+              e->add_d(a_addr, a_addr, ic); // advance to next pixel
             }
           }
           if (i != K - 1) {
-            e->add(a_addr, w); // advance to next row
+            e->add_d(a_addr,a_addr, w); // advance to next row
           }
         }
         if (D >= 3 && i != K - 1) {
-          e->add(a_addr, h); // advance to next frame
+          e->add_d(a_addr, a_addr, h); // advance to next frame
         }
       }
 
       for (int r = 0; r < (main_loop ? 4 : remainder / 8); ++r) {
-        e->vmovups(x86::ymmword_ptr(c_addr, r * 32), c[r]);
+        e->xvst(c[r], ptr(c_addr, r * 32));
       }
 
       if (compute_a_sum) {
         if (oc_per_g == 1) {
-          e->vpmovsxwd(a[0], a_sum[0].half());
-          e->vmovups(x86::ymmword_ptr(a_sum_addr), a[0]);
+          e->xvpermi_d(tmpReg1_V_, a_sum[0], 0x40);
+          e->xvexth_w_h(a[0], tmpReg1_V_);
+          e->xvst(a[0], ptr(a_sum_addr));
         } else {
           // Rollback duplication
-          e->vpsrld(a_sum[0], a_sum[0], asmjit::Imm(16));
-          e->vmovups(x86::xmmword_ptr(a_sum_addr), a_sum[0].half());
+          e->xvsrli_w(a_sum[0], a_sum[0], asmjit::Imm(16));
+          e->vst(a_sum[0].half(), ptr(a_sum_addr));
         }
 
         if (main_loop || remainder >= 8) {
           if (oc_per_g == 1) {
-            e->vpmovsxwd(a[1], a_sum[1].half());
-            e->vmovups(x86::ymmword_ptr(a_sum_addr, 32), a[1]);
+            e->xvpermi_d(tmpReg1_V_, a_sum[1], 0x40);
+            e->xvexth_w_h(a[1], tmpReg1_V_);
+            e->xvst(a[1], ptr(a_sum_addr, 32));
           } else {
             // Rollback duplication
-            e->vpsrld(a_sum[1], a_sum[1], asmjit::Imm(16));
-            e->vmovups(x86::xmmword_ptr(a_sum_addr, 16), a_sum[1].half());
+            e->xvsrli_w(a_sum[1], a_sum[1], asmjit::Imm(16));
+            e->vst(a_sum[1].half(), ptr(a_sum_addr, 16));
           }
         }
 
         if (main_loop || remainder >= 16) {
-          e->vextracti128(a_sum[0].half(), a_sum[0], asmjit::Imm(1));
           if (oc_per_g == 1) {
-            e->vpmovsxwd(a_sum[0], a_sum[0].half());
-            e->vmovups(x86::ymmword_ptr(a_sum_addr, 64), a_sum[0]);
+            e->xvpermi_d(tmpReg1_V_, a_sum[0], 0xC8);  //With vextracti128, perm: 3,0,2,0
+            e->xvexth_w_h(a_sum[0], tmpReg1_V_);
+            e->xvst(a_sum[0], ptr(a_sum_addr, 64));
           } else {
-            e->vmovups(x86::xmmword_ptr(a_sum_addr, 32), a_sum[0].half());
+            e->xvpermi_d(a_sum[0], a_sum[0], 0x0E);
+            e->vst(a_sum[0].half(), ptr(a_sum_addr, 32));
           }
         }
 
         if (main_loop || remainder >= 24) {
-          e->vextracti128(a_sum[1].half(), a_sum[1], asmjit::Imm(1));
           if (oc_per_g == 1) {
-            e->vpmovsxwd(a_sum[1], a_sum[1].half());
-            e->vmovups(x86::ymmword_ptr(a_sum_addr, 96), a_sum[1]);
+            e->xvpermi_d(tmpReg1_V_, a_sum[1], 0xC8);  //With vextracti128
+            e->xvexth_w_h(a_sum[1], tmpReg1_V_);
+            e->xvst(a_sum[1], ptr(a_sum_addr, 96));
           } else {
-            e->vmovups(x86::xmmword_ptr(a_sum_addr, 48), a_sum[1].half());
+            e->xvpermi_d(a_sum[1], a_sum[1], 0x0E);  //Put vextracti128
+            e->vst(a_sum[1].half(), ptr(a_sum_addr, 48));
           }
         }
 
         if (main_loop) {
-          e->add(a_sum_addr, asmjit::Imm(128 / oc_per_g));
+          e->addi_d(a_sum_addr, a_sum_addr, asmjit::Imm(128 / oc_per_g));
         }
       }
 
       if (main_loop) {
-        e->add(c_addr, asmjit::Imm(128));
-        e->add(a_addr_save, asmjit::Imm(32 / oc_per_g));
-        e->mov(a_addr, a_addr_save);
-        e->jmp(ic_loop_begin);
+        e->addi_d(c_addr, c_addr, asmjit::Imm(128));
+        e->addi_d(a_addr_save, a_addr_save, asmjit::Imm(32 / oc_per_g));
+        e->add_d(a_addr, a_addr_save, la64::zero);
+        e->b(ic_loop_begin);
 
         e->bind(ic_loop_end);
       }

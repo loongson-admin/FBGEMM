@@ -37,8 +37,7 @@ int PackMatrix<PT, inpType, accType>::packedBufferSize(
   if (!cpuinfo_initialize()) {
     throw std::runtime_error("Failed to initialize cpuinfo!");
   }
-  if ((!fbgemmHasAvx512VnniSupport() && !fbgemmHasAvx512Support() &&
-       !fbgemmHasAvx2Support())) {
+  if (!fbgemmHasLasxSupport()) {
     assert(0 && "unknown architecure");
   }
 
@@ -50,34 +49,10 @@ int PackMatrix<PT, inpType, accType>::packedBufferSize(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
-        MCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni>::MCB;
-        NCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni>::NCB;
-        KCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni>::KCB;
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        MCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni_ymm>::MCB;
-        NCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni_ymm>::NCB;
-        KCB = PackingTraits<inpType, accType, inst_set_t::avx512_vnni_ymm>::KCB;
-        break;
-
-      case inst_set_t::avx512:
-        MCB = PackingTraits<inpType, accType, inst_set_t::avx512>::MCB;
-        NCB = PackingTraits<inpType, accType, inst_set_t::avx512>::NCB;
-        KCB = PackingTraits<inpType, accType, inst_set_t::avx512>::KCB;
-        break;
-
-      case inst_set_t::avx512_ymm:
-        MCB = PackingTraits<inpType, accType, inst_set_t::avx512_ymm>::MCB;
-        NCB = PackingTraits<inpType, accType, inst_set_t::avx512_ymm>::NCB;
-        KCB = PackingTraits<inpType, accType, inst_set_t::avx512_ymm>::KCB;
-        break;
-
-      case inst_set_t::avx2:
-        MCB = PackingTraits<inpType, accType, inst_set_t::avx2>::MCB;
-        NCB = PackingTraits<inpType, accType, inst_set_t::avx2>::NCB;
-        KCB = PackingTraits<inpType, accType, inst_set_t::avx2>::KCB;
+      case inst_set_t::lasx:
+        MCB = PackingTraits<inpType, accType, inst_set_t::lasx>::MCB;
+        NCB = PackingTraits<inpType, accType, inst_set_t::lasx>::NCB;
+        KCB = PackingTraits<inpType, accType, inst_set_t::lasx>::KCB;
         break;
 
       default:

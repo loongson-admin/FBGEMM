@@ -14,6 +14,7 @@
 namespace fbgemm {
 
 using partition_array_t = std::array<std::array<std::array<int, 2>, 2>, 121>;
+extern partition_array_t partition_lasx;
 extern partition_array_t partition_avx2;
 extern partition_array_t partition_avx512;
 
@@ -78,8 +79,6 @@ void cblas_gemm_compute(
     int num_threads) {
   // ground truth
   assert(cpuinfo_initialize());
-  assert(cpuinfo_has_x86_fma3());
-  assert(cpuinfo_has_x86_f16c());
   assert(transa == matrix_op_t::NoTranspose);
   (void)transa; // Suppress unused variable warning
 

@@ -205,13 +205,10 @@ void SparseDenseMM(
     bool accum) {
   static const auto iset = fbgemmInstructionSet();
   // Run time CPU detection
-  if (isZmm(iset)) {
-    internal::SparseDenseMMAvx512(
+  if(iset == inst_set_t::lasx){
+    internal::SparseDenseMMLasx(
         M, N, row_ptr, col_idx, values, B, ldb, C, ldc, accum);
-  } else if (isYmm(iset)) {
-    internal::SparseDenseMMAvx2(
-        M, N, row_ptr, col_idx, values, B, ldb, C, ldc, accum);
-  } else {
+  }else {
     sparseDenseMMRef(M, N, row_ptr, col_idx, values, B, ldb, C, ldc, accum);
   }
 }
@@ -237,8 +234,8 @@ FBGEMM_API void fbgemmSparseDenseInt8MM(
   }
 
   // Run time CPU detection
-  if (isZmm(iset)) {
-    internal::SparseDenseInt8MMAvx512<FUSE_RELU, Q_GRAN>(
+  if(iset == inst_set_t::lasx) {
+    internal::SparseDenseInt8MMLasx<FUSE_RELU, Q_GRAN>(
         N,
         bcsr,
         B,
@@ -250,20 +247,7 @@ FBGEMM_API void fbgemmSparseDenseInt8MM(
         accum,
         thread_id,
         num_threads);
-  } else if (isYmm(iset)) {
-    internal::SparseDenseInt8MMAvx2<FUSE_RELU, Q_GRAN>(
-        N,
-        bcsr,
-        B,
-        ldb,
-        C_i32,
-        C_u8,
-        ldc,
-        rParams,
-        accum,
-        thread_id,
-        num_threads);
-  } else {
+  }else {
     sparseDenseInt8MMRef<FUSE_RELU, Q_GRAN>(
         N,
         bcsr,

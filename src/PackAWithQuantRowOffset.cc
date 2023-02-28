@@ -12,9 +12,9 @@
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
-#include "./OptimizedKernelsAvx2.h"
+#include "./OptimizedKernelsLasx.h"
 #include "fbgemm/Fbgemm.h"
-#include "fbgemm/QuantUtilsAvx2.h"
+#include "fbgemm/QuantUtilsLasx.h"
 
 namespace fbgemm {
 
@@ -52,8 +52,7 @@ PackAWithQuantRowOffset<T, accT>::PackAWithQuantRowOffset(
   if (std::isinf(1.0f / scale_)) {
     throw std::runtime_error("scale's reciprocal cannot be infinity");
   }
-  if ((!fbgemmHasAvx512VnniSupport() && !fbgemmHasAvx512Support() &&
-       !fbgemmHasAvx2Support())) {
+  if (!fbgemmHasLasxSupport()) {
     assert(0 && "unknown architecure");
   }
 
@@ -64,32 +63,9 @@ PackAWithQuantRowOffset<T, accT>::PackAWithQuantRowOffset(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512>::getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx512_ymm>::
-                getMatrixPackAParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_B_) =
-            PackingTraits<T, accT, inst_set_t::avx2>::getMatrixPackAParams();
+            PackingTraits<T, accT, inst_set_t::lasx>::getMatrixPackAParams();
         break;
 
       default:
@@ -161,19 +137,18 @@ void PackAWithQuantRowOffset<T, accT>::pack(const block_type_t& block) {
       std::is_same<T, uint8_t>::value,
       "PackAWithQuantRowOffset<T, accT>::pack only works for T == uint8_t");
 
-  // Only scale and zero points are used in QuantizeAvx2
   TensorQuantizationParams qparams;
   qparams.scale = scale_;
   qparams.zero_point = zero_pt_;
 
   for (int i = 0; i < block.row_size; ++i) {
-    QuantizeAvx2(
+      QuantizeLasx(
         smat_temp + i * ld_temp,
         out + i * BaseType::blockColSize(),
         block.col_size,
         qparams);
     int32_t row_sum = row_offset_acc ? row_offset_buf[i] : 0;
-    row_sum += reduceAvx2(out + i * BaseType::blockColSize(), block.col_size);
+    row_sum += reduceLasx(out + i * BaseType::blockColSize(), block.col_size);
     row_offset_buf[i] = row_sum;
 
     // zero fill
@@ -235,12 +210,8 @@ int PackAWithQuantRowOffset<T, accT>::rowOffsetBufferSize(
     if (params) {
       return params->MCB;
     } else {
-      if (fbgemmHasAvx512VnniSupport()) {
-        return PackingTraits<T, accT, inst_set_t::avx512_vnni>::MCB;
-      } else if (fbgemmHasAvx512Support()) {
-        return PackingTraits<T, accT, inst_set_t::avx512>::MCB;
-      } else if (fbgemmHasAvx2Support()) {
-        return PackingTraits<T, accT, inst_set_t::avx2>::MCB;
+      if (fbgemmHasLasxSupport()) {
+        return PackingTraits<T, accT, inst_set_t::lasx>::MCB;
       } else {
         assert(0 && "unsupported architecture");
         return -1;

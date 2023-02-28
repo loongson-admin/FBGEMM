@@ -10,19 +10,19 @@
 
 namespace fbgemm {
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 /**
- * Generate AVX512 instructions for computing block in the rank-k update of
+ * Generate LASX instructions for computing block in the rank-k update of
  * 32-bit Accumulation kernel.
  */
 template <>
 template <inst_set_t instSet>
 void CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::genComputeBlock(
-    x86::Emitter* a,
-    x86::Gp buffer_A,
-    x86::Gp buffer_B,
-    x86::Gp B_pf,
+    la64::Emitter* a,
+    la64::Gp buffer_A,
+    la64::Gp buffer_B,
+    la64::Gp B_pf,
     int rowRegs,
     int colRegs,
     int lda) {
@@ -42,61 +42,71 @@ void CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::genComputeBlock(
   // temporary register
   VecRegT res1(numRegs - 4);
 
+  VecRegT tmpReg1(numRegs - 5);
+
+  la64::Gp tempGPX = la64::s4;
+  la64::Gp temp_buffer_A = la64::s5;
+
   for (int j = 0; j < colRegs; ++j) {
     // load B
     emitLoadDWord<instSet, VecRegT>(
-        a, BReg, x86::dword_ptr(buffer_B, j * vectorLen * sizeof(int8_t)));
+        // a, BReg, x86::dword_ptr(buffer_B, j * vectorLen * sizeof(int8_t)));
+        a, BReg, ptr(buffer_B, j * vectorLen * sizeof(int8_t)));
     // load A, broadcast and fmas
     for (int i = 0; i < rowRegs; ++i) {
-      a->vpbroadcastd(
-          AReg, x86::dword_ptr(buffer_A, (i * lda) * sizeof(uint8_t)));
-      a->vpmaddubsw(res1, AReg, BReg);
-      a->vpmaddwd(res1, oneReg, res1);
-      a->vpaddd(VecRegT(i * colRegs + j), res1, VecRegT(i * colRegs + j));
+
+      mov_imm(a, temp_buffer_A, (i * lda) * sizeof(uint8_t));
+      a->add_d(temp_buffer_A, buffer_A, temp_buffer_A);
+      a->ld_d(tempGPX, ptr(temp_buffer_A));
+      a->xvreplgr2vr_w(AReg, tempGPX);
+      a->xvmulwev_h_bu_b (res1, AReg, BReg);
+      a->xvmaddwod_h_bu_b(res1, AReg, BReg);
+      a->xvmulwev_w_h (tmpReg1, oneReg, res1);
+      a->xvmaddwod_w_h(tmpReg1, oneReg, res1);
+      a->xvadd_w(VecRegT(i * colRegs + j), tmpReg1, VecRegT(i * colRegs + j));
     }
-    a->prefetcht0(x86::dword_ptr(B_pf, j * vectorLen * sizeof(int8_t)));
+    a->preld(0, B_pf, j * vectorLen * sizeof(int8_t));
   }
 }
 
 /**
- * Generate AVX512 instructions for storing the C registers back to the memory
+ * Generate LASX instructions for storing the C registers back to the memory
  * in 32-bit Accumulation kernel.
  */
 template <>
 template <inst_set_t instSet>
 void CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::storeCRegs(
-    x86::Emitter* a,
+    la64::Emitter* a,
     int rowRegs,
     int colRegs,
-    x86::Gp C_Offset,
-    x86::Gp ldcReg,
+    la64::Gp C_Offset,
+    la64::Gp ldcReg,
     bool accum) {
   using VecT = typename simd_info<instSet>::vec_reg_t;
   static constexpr int vectorLen = simd_info<instSet>::WIDTH_BYTES;
+  la64::VecX tmpReg31 = la64::xr31;
+  la64::Gp tempGPX = la64::t7;
 
   for (int i = 0; i < rowRegs; ++i) {
     if (i != 0) {
-      a->add(C_Offset, ldcReg);
+      a->add_d(C_Offset, C_Offset, ldcReg);
     } else {
-      a->xor_(C_Offset.r32(), C_Offset.r32());
+      a->xor_(C_Offset, C_Offset, C_Offset);
     }
     for (int j = 0; j < colRegs; ++j) {
+      a->addi_d(tempGPX, C_Offset, j * vectorLen * sizeof(int8_t));
+      a->add_d(tempGPX, tempGPX, la64::a3);
       if (accum) {
-        a->vpaddd(
-            VecT(i * colRegs + j),
-            VecT(i * colRegs + j),
-            x86::dword_ptr(
-                a->zcx(), C_Offset, 0, j * vectorLen * sizeof(int8_t)));
+        a->xvld(tmpReg31, ptr(tempGPX));
+        a->xvadd_w(VecT(i * colRegs + j), VecT(i * colRegs + j), tmpReg31);
       }
-      a->vmovups(
-          x86::dword_ptr(a->zcx(), C_Offset, 0, j * vectorLen * sizeof(int8_t)),
-          VecT(i * colRegs + j));
+      a->xvst(VecT(i * colRegs + j), ptr(tempGPX));
     }
   }
 }
 
 /**
- * Get or Create the AVX512 instructions for 32-bit Accumulation macro-kernel.
+ * Get or Create the LASX instructions for 32-bit Accumulation macro-kernel.
  *
  */
 template <>
@@ -143,8 +153,8 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
   return codeCache_.getOrCreate(kernelSig, [&]() -> jit_micro_kernel_fp {
     asmjit::CodeHolder code;
     code.init(runtime().environment());
-    x86::Assembler assembler(&code);
-    x86::Emitter* a = assembler.as<x86::Emitter>();
+    la64::Assembler assembler(&code);
+    la64::Emitter* a = assembler.as<la64::Emitter>();
 #if defined(FBGEMM_LOG_CODE)
     // generated code logging
     FILE* codeLogfile = fopen(
@@ -171,13 +181,12 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
     int mRegBlocks = mc / mRegBlockSize;
     int mRegBlocksRem = mc % mRegBlockSize;
 
-    // arguments to the function created
-    x86::Gp buffer_A = a->zdi();
-    x86::Gp buffer_B = a->zsi();
-    x86::Gp B_pf = a->zdx();
-    x86::Gp CBase = a->zcx();
-    x86::Gp kSize = a->gpz(8);
-    x86::Gp ldcReg = a->gpz(9);
+    la64::Gp buffer_A = la64::a0;
+    la64::Gp buffer_B = la64::a1;
+    la64::Gp B_pf = la64::a2;
+    la64::Gp CBase = la64::a3;
+    la64::Gp kSize = la64::a4;
+    la64::Gp ldcReg = la64::a5;
 
     asmjit::FuncDetail func;
     func.init(
@@ -201,10 +210,10 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
           asmjit::Support::bitMask(24, 25, 26, 27, 28, 29, 30, 31);
     }
 
-    frame.setDirtyRegs(x86::Reg::kGroupVec, dirtyVecRegs);
+    frame.setDirtyRegs(la64::Reg::kGroupVec, dirtyVecRegs);
     frame.setDirtyRegs(
-        x86::Reg::kGroupGp,
-        asmjit::Support::bitMask(8, 9, 10, 11, 12, 13, 14, 15));
+        la64::Reg::kGroupGp,
+        asmjit::Support::bitMask(23, 24, 25, 26, 27, 28, 29, 30) | asmjit::Support::bitMask(31));
 
     asmjit::FuncArgsAssignment args(&func);
     args.assignAll(buffer_A, buffer_B, B_pf, CBase, kSize, ldcReg);
@@ -218,23 +227,23 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
     asmjit::Label LoopMBlocks = a->newLabel();
     asmjit::Label LoopNBlocks = a->newLabel();
 
-    x86::Gp buffer_B_saved = a->gpz(10);
-    x86::Gp C_Offset = a->gpz(11);
-    x86::Gp B_pf_saved = a->gpz(12);
-    x86::Gp iIdx = a->gpz(13);
-    x86::Gp jIdx = a->gpz(14);
-    x86::Gp kIdx = a->gpz(15);
-    // x86::Gp B_pf = a->gpz(8);
+    la64::Gp buffer_B_saved = la64::a6;
+    la64::Gp C_Offset = la64::a7;
+    la64::Gp B_pf_saved = la64::s0;
+    la64::Gp iIdx = la64::s1;
+    la64::Gp jIdx = la64::s2;
+    la64::Gp kIdx = la64::s3;
+    la64::Gp tmpReg1 = la64::s4;
 
     VecRegT oneReg(numRegs - 3);
 
     gen16BitVectorOne<instSet, VecRegT>(a, oneReg);
-    a->imul(ldcReg, ldcReg, static_cast<asmjit::Imm>(sizeof(int32_t)));
-    // a->xor_(C_Offset.r32(), C_Offset.r32());
+    mov_imm(a, tmpReg1, sizeof(int32_t));
+    a->mul_d(ldcReg, ldcReg, tmpReg1);
 
     // save B_buffer address
-    a->mov(buffer_B_saved, buffer_B);
-    a->mov(B_pf_saved, B_pf);
+    a->add_d(buffer_B_saved, buffer_B, la64::zero);
+    a->add_d(B_pf_saved, B_pf, la64::zero);
 
     int currColRegs = nc * row_interleave / vectorLen;
     int colRegs = std::min(currColRegs, maxNRegs);
@@ -246,29 +255,25 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
       initCRegs(a, rowRegs, colRegs);
 
       // Loops over K
-      a->xor_(kIdx.r32(), kIdx.r32());
+      a->xor_(kIdx, kIdx, kIdx);
       a->bind(LoopKLabel);
 
       // k is incremented by row_interleave
-      a->add(kIdx, static_cast<asmjit::Imm>(row_interleave));
+      a->addi_d(kIdx, kIdx, row_interleave);
 
       genComputeBlock<instSet>(
           a, buffer_A, buffer_B, B_pf, rowRegs, colRegs, kBlock);
 
       // update buffer_A address for next k iteration
-      a->add(
-          buffer_A, static_cast<asmjit::Imm>(row_interleave * sizeof(uint8_t)));
+      a->addi_d(
+          buffer_A, buffer_A, static_cast<asmjit::Imm>(row_interleave * sizeof(uint8_t)));
 
       // update buffer_B address for next k iteration
-      a->add(
-          buffer_B,
-          static_cast<asmjit::Imm>(nBlock * row_interleave * sizeof(int8_t)));
-      a->add(
-          B_pf,
-          static_cast<asmjit::Imm>(nBlock * row_interleave * sizeof(int8_t)));
+      mov_imm(a, tmpReg1, nBlock * row_interleave * sizeof(int8_t));
+      a->add_d(buffer_B, buffer_B, tmpReg1);
+      a->add_d(B_pf, B_pf, tmpReg1);
 
-      a->cmp(kIdx, kSize);
-      a->jl(LoopKLabel);
+      a->blt(kIdx, kSize, LoopKLabel);
 
       // store C matrix
       storeCRegs<instSet>(a, rowRegs, colRegs, C_Offset, ldcReg, accum);
@@ -276,81 +281,78 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
 
     if (mRegBlocks > 0) {
       // move 0 to iteration variables
-      a->xor_(iIdx.r32(), iIdx.r32());
+      a->xor_(iIdx, iIdx, iIdx);
 
       a->bind(LoopMBlocks);
-      a->inc(iIdx);
+      a->addi_d(iIdx, iIdx, 1);
 
-      a->xor_(jIdx.r32(), jIdx.r32());
+      a->xor_(jIdx, jIdx, jIdx);
 
       a->bind(LoopNBlocks);
-      a->inc(jIdx);
+      a->addi_d(jIdx, jIdx, 1);
 
       issueLoopOverK(mRegBlockSize);
 
       int rowRegs = mRegBlockSize;
 
       // reset A
-      a->sub(buffer_A, kSize);
+      a->sub_d(buffer_A, buffer_A, kSize);
 
       // B for next block
-      a->mov(buffer_B, buffer_B_saved);
+      a->add_d(buffer_B, buffer_B_saved, la64::zero);
       // using C_Offset as temp reg
-      a->imul(
-          C_Offset,
-          jIdx,
-          static_cast<asmjit::Imm>(
-              nRegBlockSize * row_interleave * sizeof(int8_t)));
-      a->add(buffer_B, C_Offset);
-      a->mov(B_pf, B_pf_saved);
-      a->add(B_pf, C_Offset);
+      mov_imm(a, tmpReg1, nRegBlockSize * row_interleave * sizeof(int8_t));
+      a->mul_d(C_Offset, jIdx, tmpReg1);
+      a->add_d(buffer_B, buffer_B, C_Offset);
+      a->add_d(B_pf, B_pf_saved, la64::zero);
+      a->add_d(B_pf, B_pf, C_Offset);
 
       // increment C for next B block
-      a->add(CBase, static_cast<asmjit::Imm>(nRegBlockSize * sizeof(int32_t)));
+      a->addi_d(CBase, CBase, static_cast<asmjit::Imm>(nRegBlockSize * sizeof(int32_t)));
 
       int jLoopTrips = currColRegs / maxNRegs;
       // jLoopTrips should be at least 1
       jLoopTrips = jLoopTrips ? jLoopTrips : 1;
-      a->cmp(jIdx, jLoopTrips);
-      a->jl(LoopNBlocks);
+      mov_imm(a, tmpReg1, jLoopTrips);
+      a->blt(jIdx, tmpReg1, LoopNBlocks);
 
       // increment A for next block
-      a->add(
-          buffer_A,
-          static_cast<asmjit::Imm>((rowRegs)*kBlock * sizeof(uint8_t)));
+      mov_imm(a, tmpReg1, (rowRegs)*kBlock * sizeof(uint8_t));
+      a->add_d(
+          buffer_A, buffer_A,tmpReg1);
 
       // increment C for next A block
-      a->sub(
-          CBase,
-          static_cast<asmjit::Imm>(
-              jLoopTrips * nRegBlockSize * sizeof(int32_t)));
-      a->imul(C_Offset, ldcReg, static_cast<asmjit::Imm>(rowRegs));
-      a->add(CBase, C_Offset);
+      a->addi_d(
+          CBase, CBase,
+          -1 * jLoopTrips * nRegBlockSize * sizeof(int32_t));
+      mov_imm(a, tmpReg1, rowRegs);
+      a->mul_d(C_Offset, ldcReg, tmpReg1);
+      a->add_d(CBase, CBase, C_Offset);
 
       // reset B
-      a->mov(buffer_B, buffer_B_saved);
-      a->mov(B_pf, B_pf_saved);
-      a->cmp(iIdx, mRegBlocks);
-      a->jl(LoopMBlocks);
+      a->add_d(buffer_B, buffer_B_saved, la64::zero);
+      a->add_d(B_pf, B_pf_saved, la64::zero);
+      mov_imm(a, tmpReg1, mRegBlocks);
+      a->blt(iIdx, tmpReg1, LoopMBlocks);
     }
     // generate code for remainder
     if (mRegBlocksRem > 0) {
       asmjit::Label LoopNRem = a->newLabel();
 
-      a->xor_(jIdx.r32(), jIdx.r32());
+      a->xor_(jIdx, jIdx, jIdx);
       a->bind(LoopNRem);
-      a->inc(jIdx);
+      a->addi_d(jIdx, jIdx, 1);
 
       issueLoopOverK(mRegBlocksRem);
 
       // increment C for next B block
-      a->add(CBase, static_cast<asmjit::Imm>(nRegBlockSize * sizeof(int32_t)));
+      a->addi_d(CBase, CBase, static_cast<asmjit::Imm>(nRegBlockSize * sizeof(int32_t)));
 
       int jLoopTrips = currColRegs / maxNRegs;
       // jLoopTrips should be at least 1
       jLoopTrips = jLoopTrips ? jLoopTrips : 1;
-      a->cmp(jIdx, jLoopTrips);
-      a->jl(LoopNRem);
+      mov_imm(a, tmpReg1, jLoopTrips);
+      a->blt(jIdx, tmpReg1, LoopNRem);
     }
 
     a->emitEpilog(frame);
@@ -375,73 +377,20 @@ CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate(
   });
 }
 
-/**
- * Instantiate the AVX512 instructions for 32-bit Accumulation macro-kernel.
- *
- */
 template CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::jit_micro_kernel_fp
-CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate<inst_set_t::avx512>(
+CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate<inst_set_t::lasx>(
     bool accum,
     int32_t mc,
     int32_t nc,
     int32_t kc);
 
-/**
- * Instatiate the AVX512_256 instructions for 32-bit Accumulation macro-kernel.
- *
- */
-template CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::jit_micro_kernel_fp
-CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate<
-    inst_set_t::avx512_ymm>(bool accum, int32_t mc, int32_t nc, int32_t kc);
-
-/**
- * Instantiate the AVX2 instructions for 32-bit Accumulation macro-kernel.
- *
- */
-template CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::jit_micro_kernel_fp
-CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::getOrCreate<inst_set_t::avx2>(
-    bool accum,
-    int32_t mc,
-    int32_t nc,
-    int32_t kc);
-
-/**
- * Instantiate the inst_set_t::avx512 instructions for store kernel.
- *
- */
 template void
-CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::storeCRegs<inst_set_t::avx512>(
-    x86::Emitter* a,
+CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::storeCRegs<inst_set_t::lasx>(
+    la64::Emitter* a,
     int rowRegs,
     int colRegs,
-    x86::Gp C_Offset,
-    x86::Gp ldcReg,
-    bool accum);
-
-/**
- * Instantiate the inst_set_t::avx512_ymm instructions for store kernel.
- *
- */
-template void CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::storeCRegs<
-    inst_set_t::avx512_ymm>(
-    x86::Emitter* a,
-    int rowRegs,
-    int colRegs,
-    x86::Gp C_Offset,
-    x86::Gp ldcReg,
-    bool accum);
-
-/**
- * Instantiate the inst_set_t::avx2 instructions for store kernel.
- *
- */
-template void
-CodeGenBase<uint8_t, int8_t, int32_t, int32_t>::storeCRegs<inst_set_t::avx2>(
-    x86::Emitter* a,
-    int rowRegs,
-    int colRegs,
-    x86::Gp C_Offset,
-    x86::Gp ldcReg,
+    la64::Gp C_Offset,
+    la64::Gp ldcReg,
     bool accum);
 
 } // namespace fbgemm

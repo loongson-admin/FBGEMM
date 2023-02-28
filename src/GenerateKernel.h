@@ -18,15 +18,14 @@
 
 namespace fbgemm {
 
-namespace x86 = asmjit::x86;
+namespace la64 = asmjit::la64;
 
 /**
  * @brief Generate instructions for initializing the C registers to 0.
  */
-void initCRegs(x86::Emitter* a, int rowRegs, int colRegs);
+void initCRegs(la64::Emitter* a, int rowRegs, int colRegs);
 
 /**
- * @brief AVX2/AVX512/AVX512VNNI JIT assembly code generator.
  * @tparam TA Type of matrix A.
  * @tparam TB Type of matrix B.
  * @tparam TC Type of matrix C.
@@ -67,10 +66,10 @@ class CodeGenBase {
    */
   template <inst_set_t instSet>
   void genComputeBlock(
-      x86::Emitter* a,
-      x86::Gp buffer_A,
-      x86::Gp buffer_B,
-      x86::Gp B_pf,
+      la64::Emitter* a,
+      la64::Gp buffer_A,
+      la64::Gp buffer_B,
+      la64::Gp B_pf,
       int rowRegs,
       int colRegs,
       int lda);
@@ -81,12 +80,12 @@ class CodeGenBase {
    */
   template <inst_set_t instSet>
   void storeCRegs(
-      x86::Emitter* a,
-      int rowRegs,
-      int colRegs,
-      x86::Gp C_Offset,
-      x86::Gp ldcReg,
-      bool accum);
+    la64::Emitter* a,
+    int rowRegs,
+    int colRegs,
+    la64::Gp C_Offset,
+    la64::Gp ldcReg,
+    bool accum);
 
   const BlockingFactors* blocking_params;
   /**
@@ -115,14 +114,8 @@ class CodeGenBase {
         << "_NC-" + std::to_string(nc) << "_NCB-" + std::to_string(NCB)
         << "_KCB-" + std::to_string(KCB) << "_MR-" + std::to_string(MR)
         << "_NR-" + std::to_string(NR);
-    if (instSet == inst_set_t::avx512_vnni) {
-      oss << "_avx512vnni";
-    } else if (instSet == inst_set_t::avx512) {
-      oss << "_avx512";
-    } else if (instSet == inst_set_t::avx512_ymm) {
-      oss << "_avx512_ymm";
-    } else if (instSet == inst_set_t::avx2) {
-      oss << "_avx2";
+    if (instSet == inst_set_t::lasx) {
+      oss << "_lasx";
     }
     oss << ".txt";
     return oss.str();

@@ -1,9 +1,10 @@
 [submodule "third_party/asmjit"]
 	path = third_party/asmjit
-	url = https://github.com/asmjit/asmjit.git
+	url = https://github.com/loongson/asmjit.git
+	branch = loongarch64
 [submodule "third_party/cpuinfo"]
 	path = third_party/cpuinfo
-	url = https://github.com/pytorch/cpuinfo
+	url = https://github.com/loongson/cpuinfo.git
 [submodule "third_party/googletest"]
 	path = third_party/googletest
 	url = https://github.com/google/googletest

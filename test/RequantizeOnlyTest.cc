@@ -136,9 +136,9 @@ TEST_P(FloatRequantizeTest, floatBiasTest) {
       cols,                                                   \
       1,                                                      \
       act_times_w_scale.data());                              \
-  reqObj_q.f<inst_set_t::avx2>(                               \
+  reqObj_q.f<inst_set_t::lasx>(                               \
       output_q_bias.data(), input.data(), block, cols, cols); \
-  reqObj_f.f<inst_set_t::avx2>(                               \
+  reqObj_f.f<inst_set_t::lasx>(                               \
       output_f_bias.data(), input.data(), block, cols, cols);
 
   if (fuse_relu) {

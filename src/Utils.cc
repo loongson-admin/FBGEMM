@@ -176,11 +176,7 @@ bool g_Avx512_Ymm_enabled = false;
 inst_set_t fbgemmEnvGetIsa() {
   static const char* isa_env = "FBGEMM_ENABLE_INSTRUCTIONS";
   static const std::unordered_map<std::string, inst_set_t> isaMap = {
-      {"AVX2", inst_set_t::avx2},
-      {"AVX512", inst_set_t::avx512},
-      {"AVX512_E1", inst_set_t::avx512_vnni},
-      {"AVX512_256", inst_set_t::avx512_ymm},
-      {"AVX512_E1_256", inst_set_t::avx512_vnni_ymm},
+      {"LASX", inst_set_t::lasx},
   };
   const char* env = std::getenv(isa_env);
   if (env == nullptr) {
@@ -191,18 +187,6 @@ inst_set_t fbgemmEnvGetIsa() {
   std::transform(val.begin(), val.end(), val.begin(), ::toupper);
   auto it = isaMap.find(val);
   return it == isaMap.end() ? inst_set_t::anyarch : it->second;
-}
-
-bool fbgemmEnvAvx512_256Enabled() {
-  static const char* isa_env = "FBGEMM_ENABLE_AVX512_256";
-  const char* env = std::getenv(isa_env);
-  if (env == nullptr) {
-    return false;
-  }
-
-  std::string val(env);
-  std::transform(val.begin(), val.end(), val.begin(), ::tolower);
-  return val == "true" || val == "1";
 }
 
 // This is require for build by older compilers GCC 5.4 and C++11
@@ -218,45 +202,17 @@ std::unordered_map<
     inst_set_t_hash>
     isaSupportMap = {
         {inst_set_t::anyarch, {inst_set_t::anyarch}},
-        {inst_set_t::avx2, {inst_set_t::avx2, inst_set_t::anyarch}},
-        {inst_set_t::avx512,
-         {inst_set_t::avx512, inst_set_t::avx512_ymm, inst_set_t::avx2}},
-        {inst_set_t::avx512_ymm,
-         {inst_set_t::avx512, inst_set_t::avx512_ymm, inst_set_t::avx2}},
-        {inst_set_t::avx512_vnni,
-         {inst_set_t::avx512_vnni,
-          inst_set_t::avx512_vnni_ymm,
-          inst_set_t::avx512,
-          inst_set_t::avx512_ymm,
-          inst_set_t::avx2}},
-        {inst_set_t::avx512_vnni_ymm,
-         {inst_set_t::avx512_vnni,
-          inst_set_t::avx512_vnni_ymm,
-          inst_set_t::avx512,
-          inst_set_t::avx512_ymm,
-          inst_set_t::avx2}},
 };
 
 } // namespace
 
 /**
- * @brief Force specific architecure to for GEMM kernel execution
- *        overides FBGEMM_ENABLE_AVX512_256 env. variable
- * @param isa the ISA to enforce, supported optionsi
- *     AVX2          inst_set_t::avx2
- *     AVX512        inst_set_t::avx512
- *     AVX512_E1     inst_set_t::avx512_vnni
- *     AVX512_256    inst_set_t::avx512_ymm
- *     AVX512_E1_256 inst_set_t::avx512_vnni_ymm
  */
 void fbgemmForceIsa(inst_set_t isa) {
   g_forced_isa = isa;
 }
 
 /**
- * @brief Enables AVX512-256 if appriate. Inteded for Skylake based Xeon-D
- *        processors, wherein AXV512-256 is preferred due to higher
- *        Turbo frequencis
  * @param flag True enables / False disables
  */
 void fbgemmEnableAvx512Ymm(bool flag) {
@@ -264,17 +220,9 @@ void fbgemmEnableAvx512Ymm(bool flag) {
 }
 
 /**
- * @brief Determine the best available x86 machine ISA to be used for
- *        GEMM kernels.
- *        FBGEMM_ENABLE_AVX512_256 env. or fbgemmForceIsa() are set
- *        forces to specific architecture if supported by the processor.
- *        Enforcing on Skylake to AVX2 will execute AVX2 version of the kernel
- *        However, enforcing AVX512-256 on Broadwell will fail, and AVX2 version
- *        of the kernels will be executed.
  */
 inst_set_t fbgemmInstructionSet() {
   static const inst_set_t env_forced_isa = fbgemmEnvGetIsa();
-  static const bool isAvx512_Ymm_enabled = fbgemmEnvAvx512_256Enabled();
 
   inst_set_t forced_isa =
       g_forced_isa != inst_set_t::anyarch ? g_forced_isa : env_forced_isa;
@@ -282,22 +230,8 @@ inst_set_t fbgemmInstructionSet() {
     inst_set_t isa = inst_set_t::anyarch;
     // Check environment
     if (cpuinfo_initialize()) {
-      const bool isXeonD = fbgemmIsIntelXeonD() &&
-          (g_Avx512_Ymm_enabled || isAvx512_Ymm_enabled);
-      if (fbgemmHasAvx512VnniSupport()) {
-        if (isXeonD) {
-          isa = inst_set_t::avx512_vnni_ymm;
-        } else {
-          isa = inst_set_t::avx512_vnni;
-        }
-      } else if (fbgemmHasAvx512Support()) {
-        if (isXeonD) {
-          isa = inst_set_t::avx512_ymm;
-        } else {
-          isa = inst_set_t::avx512;
-        }
-      } else if (fbgemmHasAvx2Support()) {
-        isa = inst_set_t::avx2;
+      if (fbgemmHasLasxSupport()) {
+        isa = inst_set_t::lasx;
       }
     }
     return isa;
@@ -316,36 +250,33 @@ inst_set_t fbgemmInstructionSet() {
   return supported_isa->second.count(forced_isa) ? forced_isa : detected_isa;
 }
 
+// Test and Bench used
 bool isZmm(inst_set_t isa) {
-  return isa == inst_set_t::avx512 || isa == inst_set_t::avx512_vnni;
+  (void)isa;
+
+  return false;
 }
 
 bool isYmm(inst_set_t isa) {
-  return isa == inst_set_t::avx512_ymm || isa == inst_set_t::avx512_vnni_ymm ||
-      isa == inst_set_t::avx2;
-}
+  (void)isa;
 
-bool fbgemmIsIntelXeonD() {
-  auto const pkgInfo = cpuinfo_get_packages();
-  if (strstr(pkgInfo->name, "Intel Xeon D-") ||
-      cpuinfo_get_packages_count() == 1) {
-    return true;
-  }
   return false;
 }
 
 bool fbgemmHasAvx512Support() {
-  return (
-      cpuinfo_has_x86_avx512f() && cpuinfo_has_x86_avx512bw() &&
-      cpuinfo_has_x86_avx512dq() && cpuinfo_has_x86_avx512vl());
+  return false;
 }
 
 bool fbgemmHasAvx2Support() {
-  return (cpuinfo_has_x86_avx2());
+  return false;
+}
+
+bool fbgemmHasLasxSupport() {
+  return (cpuinfo_has_loongarch_lasx());
 }
 
 bool fbgemmHasAvx512VnniSupport() {
-  return (cpuinfo_has_x86_avx512vnni());
+  return false;
 }
 
 void fbgemmPartition1D(

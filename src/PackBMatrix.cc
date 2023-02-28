@@ -45,10 +45,9 @@
  *
  * Note 4: Minimum value of NCB is such that the number of bits in
  * NCB*ROW_INTERLEAVE elements at the very minimum is equal to the vector length
- * (i.e., 256 for avx2 and 512 for avx512).
  *
  * Minimum NCB value for int8 data type:
- *            avx2     avx512
+ *          simd256  simd512
  *    acc16   16       32
  *    acc32   8        16
  *
@@ -196,32 +195,9 @@ PackBMatrix<T, accT>::PackBMatrix(
   } else {
     const inst_set_t isa = fbgemmInstructionSet();
     switch (isa) {
-      case inst_set_t::avx512_vnni:
+      case inst_set_t::lasx:
         std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni>::
-                getMatrixPackBParams();
-        break;
-
-      case inst_set_t::avx512_vnni_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_) =
-            PackingTraits<T, accT, inst_set_t::avx512_vnni_ymm>::
-                getMatrixPackBParams();
-        break;
-
-      case inst_set_t::avx512:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_) =
-            PackingTraits<T, accT, inst_set_t::avx512>::getMatrixPackBParams();
-        break;
-
-      case inst_set_t::avx512_ymm:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_) =
-            PackingTraits<T, accT, inst_set_t::avx512_ymm>::
-                getMatrixPackBParams();
-        break;
-
-      case inst_set_t::avx2:
-        std::tie(BaseType::brow_, BaseType::bcol_, row_interleave_) =
-            PackingTraits<T, accT, inst_set_t::avx2>::getMatrixPackBParams();
+            PackingTraits<T, accT, inst_set_t::lasx>::getMatrixPackBParams();
         break;
 
       default:

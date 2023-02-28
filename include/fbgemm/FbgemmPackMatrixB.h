@@ -89,10 +89,11 @@ class PackedGemmMatrixB {
     if (!cpuinfo_initialize()) {
       throw std::runtime_error("Failed to initialize cpuinfo!");
     }
-    bcol_ = (isZmm(fbgemmInstructionSet())
-                 ? simd_info<inst_set_t::avx512>::WIDTH_32BIT_ELEMS
-                 : simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS) *
-        kernelNumColBlocks();
+    // bcol_ = (isZmm(fbgemmInstructionSet())
+    //              ? simd_info<inst_set_t::avx512>::WIDTH_32BIT_ELEMS
+    //              : simd_info<inst_set_t::avx2>::WIDTH_32BIT_ELEMS) *
+    //     kernelNumColBlocks();
+    bcol_ = (simd_info<inst_set_t::lasx>::WIDTH_32BIT_ELEMS) * kernelNumColBlocks();
 
     // set up internal packing parameters
     nbrow_ = (numRows() + blockRowSize() - 1) / blockRowSize();

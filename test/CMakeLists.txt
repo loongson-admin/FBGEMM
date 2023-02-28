@@ -47,7 +47,7 @@ macro(add_gtest TESTNAME)
     endif()
   else(MSVC)
     target_compile_options(${TESTNAME} PRIVATE
-     "-m64" "-mavx2" "-mfma" "-masm=intel")
+     "-mlsx" "-mlasx")
   endif(MSVC)
   if (USE_SANITIZER)
     target_compile_options(${TESTNAME} PRIVATE

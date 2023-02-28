@@ -15,7 +15,7 @@
 
 #include "./BenchUtils.h"
 #include "fbgemm/Fbgemm.h"
-#include "src/OptimizedKernelsAvx2.h"
+#include "src/OptimizedKernelsLasx.h"
 
 using namespace std;
 using namespace fbgemm;
@@ -32,7 +32,7 @@ void performance_test() {
     aligned_vector<uint8_t> a(len);
 
     double duration =
-        measureWithWarmup([&]() { reduceAvx2(a.data(), len); }, NWARMUP, NITER);
+        measureWithWarmup([&]() { reduceLasx(a.data(), len); }, NWARMUP, NITER);
     duration *= 1e9; // convert to ns
 
     cout << setw(4) << len << ", " << setw(10) << setprecision(3)

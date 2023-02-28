@@ -212,7 +212,7 @@ FBGEMM_SPECIALIZED_QUANTIZE(int16_t, false)
 FBGEMM_SPECIALIZED_QUANTIZE(int32_t, false)
 #undef FBGEMM_SPECIALIZED_QUANTIZE
 
-#define FBGEMM_SPECIALIZED_QUANTIZE_AVX2(T, LEGACY)                     \
+#define FBGEMM_SPECIALIZED_QUANTIZE_LASX(T, LEGACY)                     \
   template <>                                                           \
   FBGEMM_API void Quantize<T, LEGACY>(                                  \
       const float* src,                                                 \
@@ -221,13 +221,11 @@ FBGEMM_SPECIALIZED_QUANTIZE(int32_t, false)
       const TensorQuantizationParams& qparams,                          \
       int thread_id,                                                    \
       int num_threads) {                                                \
-    bool avx2_support = cpuinfo_initialize() && fbgemmHasAvx2Support(); \
-    bool fma_support = cpuinfo_has_x86_fma3();                          \
+    bool lasx_support = cpuinfo_initialize() && fbgemmHasLasxSupport(); \
     int i_begin, i_end;                                                 \
     fbgemmPartition1D(thread_id, num_threads, len, i_begin, i_end);     \
-    if (avx2_support && fma_support && qparams.precision == 8) {        \
-      /* fast path  */                                                  \
-      QuantizeAvx2<T, LEGACY>(                                          \
+    if (lasx_support && qparams.precision == 8) {                       \
+      QuantizeLasx<T, LEGACY>(                                          \
           &src[i_begin], &dst[i_begin], i_end - i_begin, qparams);      \
     } else {                                                            \
       for (int i = i_begin; i < i_end; ++i) {                           \
@@ -236,13 +234,13 @@ FBGEMM_SPECIALIZED_QUANTIZE(int32_t, false)
     }                                                                   \
   }
 
-FBGEMM_SPECIALIZED_QUANTIZE_AVX2(int8_t, true)
-FBGEMM_SPECIALIZED_QUANTIZE_AVX2(uint8_t, true)
-FBGEMM_SPECIALIZED_QUANTIZE_AVX2(int8_t, false)
-FBGEMM_SPECIALIZED_QUANTIZE_AVX2(uint8_t, false)
-#undef FBGEMM_SPECIALIZED_QUANTIZE_AVX2
+FBGEMM_SPECIALIZED_QUANTIZE_LASX(int8_t, true)
+FBGEMM_SPECIALIZED_QUANTIZE_LASX(uint8_t, true)
+FBGEMM_SPECIALIZED_QUANTIZE_LASX(int8_t, false)
+FBGEMM_SPECIALIZED_QUANTIZE_LASX(uint8_t, false)
+#undef FBGEMM_SPECIALIZED_QUANTIZE_LASX
 
-#define FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_AVX2(T)            \
+#define FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_LASX(T)            \
   template <>                                                           \
   FBGEMM_API void FusedQuantizeDequantize<T>(                           \
       const float* src,                                                 \
@@ -252,13 +250,12 @@ FBGEMM_SPECIALIZED_QUANTIZE_AVX2(uint8_t, false)
       int thread_id,                                                    \
       int num_threads,                                                  \
       float noise_ratio) {                                              \
-    bool avx2_support = cpuinfo_initialize() && fbgemmHasAvx2Support(); \
-    bool fma_support = cpuinfo_has_x86_fma3();                          \
+    bool lasx_support = cpuinfo_initialize() && fbgemmHasLasxSupport(); \
     int i_begin, i_end;                                                 \
     fbgemmPartition1D(thread_id, num_threads, len, i_begin, i_end);     \
-    if (avx2_support && fma_support && qparams.precision == 8) {        \
+    if (lasx_support && qparams.precision == 8) {        \
       /* fast path  */                                                  \
-      FusedQuantizeDequantizeAvx2<T>(                                   \
+      FusedQuantizeDequantizeLasx<T>(                                   \
           &src[i_begin], &dst[i_begin], i_end - i_begin, qparams);      \
     } else if (noise_ratio <= 0.0f) {                                   \
       for (int i = i_begin; i < i_end; ++i) {                           \
@@ -269,9 +266,9 @@ FBGEMM_SPECIALIZED_QUANTIZE_AVX2(uint8_t, false)
     }                                                                   \
   }
 
-FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_AVX2(int8_t)
-FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_AVX2(uint8_t)
-#undef FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_AVX2
+FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_LASX(int8_t)
+FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_LASX(uint8_t)
+#undef FBGEMM_SPECIALIZED_FUSED_QUANTIZE_DEQUANTIZE_LASX
 
 #define FBGEMM_SPECIALIZED_QUANTIZEGROUPWISEKCX(T)                \
   template <>                                                     \
@@ -320,15 +317,14 @@ FBGEMM_API void QuantizeGroupwise<uint8_t, layout_t::KCX>(
   int C_per_G = C / G;
   fbgemm::TensorQuantizationParams qparams;
   qparams.precision = 8 * sizeof(uint8_t);
-  bool takeFastPath =
-      cpuinfo_initialize() && fbgemmHasAvx2Support() && cpuinfo_has_x86_fma3();
+  bool takeFastPath = cpuinfo_initialize() && fbgemmHasLasxSupport();
 
   for (int i = 0; i < K; ++i) {
     for (int g = 0; g < G; ++g) {
       qparams.scale = scales[g];
       qparams.zero_point = zero_points[g];
       if (takeFastPath) {
-        QuantizeAvx2(
+        QuantizeLasx(
             src + (i * C + g * C_per_G) * X,
             dst + (i * C + g * C_per_G) * X,
             C_per_G * X,
@@ -424,8 +420,8 @@ FBGEMM_API void Requantize<uint8_t>(
   int i_begin, i_end;
   fbgemmPartition1D(thread_id, num_threads, len, i_begin, i_end);
   if (params.target_qparams.precision == 8 && cpuinfo_initialize() &&
-      fbgemmHasAvx2Support()) {
-    RequantizeAvx2(&src[i_begin], &dst[i_begin], i_end - i_begin, params);
+      fbgemmHasLasxSupport()) {
+    RequantizeLasx(&src[i_begin], &dst[i_begin], i_end - i_begin, params);
   } else {
     for (int i = i_begin; i < i_end; ++i) {
       dst[i] = Requantize<uint8_t>(src[i], params);
@@ -444,8 +440,8 @@ FBGEMM_API void RequantizeFixedPoint(
   int i_begin, i_end;
   fbgemmPartition1D(thread_id, num_threads, len, i_begin, i_end);
   if (std::is_same<T, uint8_t>::value && params.target_qparams.precision == 8 &&
-      cpuinfo_initialize() && fbgemmHasAvx2Support()) {
-    RequantizeFixedPointAvx2(
+      cpuinfo_initialize() && fbgemmHasLasxSupport()) {
+    RequantizeFixedPointLasx(
         &src[i_begin], &dst[i_begin], i_end - i_begin, params);
   } else {
     for (int i = i_begin; i < i_end; ++i) {
@@ -485,8 +481,8 @@ FBGEMM_API void RequantizeFixedPoint<uint8_t>(
   fbgemmPartition1D(thread_id, num_threads, len, i_begin, i_end);
 
   if (params.target_qparams.precision == 8 && cpuinfo_initialize() &&
-      fbgemmHasAvx2Support()) {
-    RequantizeFixedPointAvx2(
+      fbgemmHasLasxSupport()) {
+    RequantizeFixedPointLasx(
         &src[i_begin], &dst[i_begin], i_end - i_begin, params);
   } else {
     for (int i = i_begin; i < i_end; ++i) {
@@ -585,18 +581,18 @@ void FloatOrHalfToFusedNBitRowwiseQuantizedSBHalf(
     throw std::runtime_error("Unsupported number of columns");
   }
 
-  if (cpuinfo_initialize() && fbgemmHasAvx2Support()) {
+  if (cpuinfo_initialize() && fbgemmHasLasxSupport()) {
     switch (bit_rate) {
       case 2:
-        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfAvx2<InputType, 2>(
+        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfLasx<InputType, 2>(
             input, input_rows, input_columns, output);
         break;
       case 4:
-        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfAvx2<InputType, 4>(
+        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfLasx<InputType, 4>(
             input, input_rows, input_columns, output);
         break;
       case 8:
-        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfAvx2<InputType, 8>(
+        FloatOrHalfToFusedNBitRowwiseQuantizedSBHalfLasx<InputType, 8>(
             input, input_rows, input_columns, output);
         break;
       default:
@@ -655,8 +651,8 @@ void FloatOrHalfToFused8BitRowwiseQuantizedSBFloat(
     size_t input_rows,
     int input_columns,
     std::uint8_t* output) {
-  if (cpuinfo_initialize() && fbgemmHasAvx2Support()) {
-    FloatOrHalfToFused8BitRowwiseQuantizedSBFloatAvx2<InputType>(
+  if (cpuinfo_initialize() && fbgemmHasLasxSupport()) {
+    FloatOrHalfToFused8BitRowwiseQuantizedSBFloatLasx<InputType>(
         input, input_rows, input_columns, output);
   } else {
     FloatOrHalfToFused8BitRowwiseQuantizedSBFloatRef<InputType>(
@@ -708,18 +704,18 @@ void FusedNBitRowwiseQuantizedSBHalfToFloatOrHalf(
     size_t input_rows,
     int input_columns,
     OutputType* output) {
-  if (cpuinfo_initialize() && fbgemmHasAvx2Support()) {
+  if (cpuinfo_initialize() && fbgemmHasLasxSupport()) {
     switch (bit_rate) {
       case 2:
-        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfAvx2<OutputType, 2>(
+        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfLasx<OutputType, 2>(
             input, input_rows, input_columns, output);
         break;
       case 4:
-        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfAvx2<OutputType, 4>(
+        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfLasx<OutputType, 4>(
             input, input_rows, input_columns, output);
         break;
       case 8:
-        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfAvx2<OutputType, 8>(
+        FusedNBitRowwiseQuantizedSBHalfToFloatOrHalfLasx<OutputType, 8>(
             input, input_rows, input_columns, output);
         break;
       default:
@@ -764,8 +760,8 @@ void Fused8BitRowwiseQuantizedSBFloatToFloatOrHalf(
     size_t input_rows,
     int input_columns,
     OutputType* output) {
-  if (cpuinfo_initialize() && fbgemmHasAvx2Support()) {
-    Fused8BitRowwiseQuantizedSBFloatToFloatOrHalfAvx2<OutputType>(
+  if (cpuinfo_initialize() && fbgemmHasLasxSupport()) {
+    Fused8BitRowwiseQuantizedSBFloatToFloatOrHalfLasx<OutputType>(
         input, input_rows, input_columns, output);
   } else {
     Fused8BitRowwiseQuantizedSBFloatToFloatOrHalfRef<OutputType>(

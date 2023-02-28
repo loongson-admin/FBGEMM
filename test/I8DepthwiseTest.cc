@@ -12,7 +12,7 @@
 
 #include "bench/AlignedVec.h"
 #include "bench/BenchUtils.h"
-#include "fbgemm/FbgemmI8DepthwiseAvx2.h"
+#include "fbgemm/FbgemmI8DepthwiseLasx.h"
 #include "src/RefImplementations.h"
 
 using namespace std;

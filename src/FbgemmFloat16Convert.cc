@@ -37,10 +37,9 @@ void FloatToFloat16_simd(
     bool do_clip) {
   // Run time CPU detection
   if (cpuinfo_initialize()) {
-    if (fbgemmHasAvx512Support()) {
-      FloatToFloat16_avx512(src, dst, size, do_clip);
-    } else if (fbgemmHasAvx2Support()) {
-      FloatToFloat16_avx2(src, dst, size, do_clip);
+    if (fbgemmHasLasxSupport()) {
+      // FloatToFloat16_lasx(src, dst, size, do_clip);  //No FP32->FP16 convert instruction
+      FloatToFloat16_ref(src, dst, size, do_clip);
     } else {
       FloatToFloat16_ref(src, dst, size, do_clip);
       return;
@@ -53,10 +52,8 @@ void FloatToFloat16_simd(
 void Float16ToFloat_simd(const float16* src, float* dst, size_t size) {
   // Run time CPU detection
   if (cpuinfo_initialize()) {
-    if (fbgemmHasAvx512Support()) {
-      Float16ToFloat_avx512(src, dst, size);
-    } else if (fbgemmHasAvx2Support()) {
-      Float16ToFloat_avx2(src, dst, size);
+    if (fbgemmHasLasxSupport()) {
+      Float16ToFloat_lasx(src, dst, size);
     } else {
       Float16ToFloat_ref(src, dst, size);
       return;

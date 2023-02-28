@@ -12,8 +12,8 @@
 
 #include "fbgemm/FbgemmBuild.h"
 #include "fbgemm/FbgemmSparse.h"
-#include "fbgemm/UtilsAvx2.h"
-#include "fbgemm/spmmUtilsAvx2.h"
+#include "fbgemm/UtilsLasx.h"
+#include "fbgemm/spmmUtilsLasx.h"
 
 namespace fbgemm {
 

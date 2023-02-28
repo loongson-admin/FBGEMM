@@ -9,9 +9,7 @@
 #include <cmath>
 #include <utility>
 
-#include "./FbgemmFP16UKernelsAvx2.h"
-#include "./FbgemmFP16UKernelsAvx512.h"
-#include "./FbgemmFP16UKernelsAvx512_256.h"
+#include "./FbgemmFP16UKernelsLasx.h"
 #include "fbgemm/Fbgemm.h"
 #include "fbgemm/FbgemmFPCommon.h"
 
@@ -22,72 +20,29 @@ namespace {
 // 2 in ?x2 should be the same as kernel_ncol_blocks.
 // Here with kernel_ncol_blocks = 2, we can provide up to 6x2 kernels, due to
 // the restrictions of ymm register numbers (16).
-constexpr kernel_array_t<float16> kernel_fp16_avx2 = {
-    nullptr,
-    gemmkernel_1x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_2x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_3x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_4x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_5x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_6x2_Avx2_fp16_fA0fB0fC0};
 
-constexpr kernel_array_t<float16> kernel_fp16_avx512_256 = {
+constexpr kernel_array_t<float16> kernel_fp16_lasx = {
     nullptr,
-    gemmkernel_1x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_2x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_3x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_4x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_5x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_6x2_Avx2_fp16_fA0fB0fC0,
-    gemmkernel_7x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_8x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_9x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_10x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_11x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_12x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_13x2_Avx512_256_fp16_fA0fB0fC0,
-    gemmkernel_14x2_Avx512_256_fp16_fA0fB0fC0};
-
-constexpr kernel_array_t<float16> kernel_fp16_avx512 = {
-    nullptr,
-    gemmkernel_1x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_2x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_3x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_4x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_5x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_6x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_7x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_8x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_9x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_10x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_11x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_12x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_13x2_Avx512_fp16_fA0fB0fC0,
-    gemmkernel_14x2_Avx512_fp16_fA0fB0fC0};
+    gemmkernel_1x2_Lasx_fp16_fA0fB0fC0,
+    gemmkernel_2x2_Lasx_fp16_fA0fB0fC0,
+    gemmkernel_3x2_Lasx_fp16_fA0fB0fC0,
+    gemmkernel_4x2_Lasx_fp16_fA0fB0fC0,
+    gemmkernel_5x2_Lasx_fp16_fA0fB0fC0,
+    gemmkernel_6x2_Lasx_fp16_fA0fB0fC0 };
 
 } // namespace
 
 template <>
 const isa_descriptor<float16>& getIsaHandlers(inst_set_t isa, float16) {
-  static isa_descriptor<float16> avx2_descriptor =
-      std::make_tuple(kernel_fp16_avx2, partition_avx2);
-  static isa_descriptor<float16> avx512_descriptor =
-      std::make_tuple(kernel_fp16_avx512, partition_avx512);
-  static isa_descriptor<float16> avx512_256_descriptor =
-      std::make_tuple(kernel_fp16_avx512_256, partition_avx512);
+  static isa_descriptor<float16> lasx_descriptor =
+      std::make_tuple(kernel_fp16_lasx, partition_lasx);
 
   switch (isa) {
     case inst_set_t::anyarch:
-    case inst_set_t::avx2:
-      return avx2_descriptor;
-
-    case inst_set_t::avx512:
-    case inst_set_t::avx512_vnni:
-      return avx512_descriptor;
-
-    case inst_set_t::avx512_ymm:
-    case inst_set_t::avx512_vnni_ymm:
-      return avx512_256_descriptor;
+    case inst_set_t::lasx:
+      return lasx_descriptor;
+    default:
+      break;
   }
 
   throw std::runtime_error("Unsupported uArch");

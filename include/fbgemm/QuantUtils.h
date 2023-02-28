@@ -1,7 +1,7 @@
 #pragma once
 
 #include "./FbgemmBuild.h"
-#include "./QuantUtilsAvx2.h"
+#include "./QuantUtilsLasx.h"
 #include "./Types.h"
 #include "./Utils.h"
 

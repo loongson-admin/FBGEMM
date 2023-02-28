@@ -31,7 +31,7 @@ macro(add_benchmark BENCHNAME)
           CXX_STANDARD 11
           CXX_EXTENSIONS NO)
   target_compile_options(${BENCHNAME} PRIVATE
-    "-m64" "-mavx2" "-mfma" "-masm=intel")
+    "-mlsx" "-mlasx")
   target_link_libraries(${BENCHNAME} fbgemm)
   add_dependencies(${BENCHNAME} fbgemm)
 

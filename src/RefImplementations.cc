@@ -1615,8 +1615,7 @@ int rowwise_sparse_adagrad_ref(
       float gj = std::fma(weight_decay * freq, w_[j], g_[j]);
       partial_sum[j % VLEN] += gj * gj;
     }
-    final_sum = ((partial_sum[0] + partial_sum[1]) +
-                 (partial_sum[2] + partial_sum[3])) +
+    final_sum = ((partial_sum[0] + partial_sum[1]) + (partial_sum[2] + partial_sum[3])) +
         ((partial_sum[4] + partial_sum[5]) + (partial_sum[6] + partial_sum[7]));
     final_sum /= block_size;
     float hi = *h_ = *h_ + final_sum;

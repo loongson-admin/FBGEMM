@@ -12,8 +12,8 @@
 #include <vector>
 
 #include "fbgemm/FbgemmBuild.h"
-#include "fbgemm/UtilsAvx2.h"
-#include "fbgemm/spmmUtilsAvx2.h"
+#include "fbgemm/UtilsLasx.h"
+#include "fbgemm/spmmUtilsLasx.h"
 
 namespace fbgemm {
 
@@ -153,7 +153,7 @@ FBGEMM_API void fbgemmSparseDenseInt8MM(
 
 namespace internal {
 
-void SparseDenseMMAvx2(
+void SparseDenseMMLasx(
     int M,
     int N,
     const int* row_ptr,
@@ -178,7 +178,7 @@ void SparseDenseMMAvx512(
     bool accum = false);
 
 template <bool FUSE_RELU, QuantizationGranularity Q_GRAN>
-void SparseDenseInt8MMAvx2(
+void SparseDenseInt8MMLasx(
     int N,
     const std::unique_ptr<BCSRMatrix<>>& bcsr,
     const uint8_t* B,
